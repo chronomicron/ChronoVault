@@ -1,0 +1,3 @@
+PyQt5>=5.15.6
+Pillow>=9.1.0
+exifread>=3.0.0
