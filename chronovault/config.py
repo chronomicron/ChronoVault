@@ -4,7 +4,7 @@ ChronoVault config module.
 Defines constants and configuration settings (e.g., image extensions, archive
 directory) for ChronoVault.
 
-Author: [Your Name]
+Author: [chronomicron@gmail.com]
 Created: 2025-05-03
 """
 

@@ -4,7 +4,7 @@ ChronoVault database module.
 Manages SQLite database operations for storing and retrieving image metadata
 (e.g., file paths, dates, people, locations).
 
-Author: [Your Name]
+Author: [chronomicron@gmail.com]
 Created: 2025-05-03
 """
 

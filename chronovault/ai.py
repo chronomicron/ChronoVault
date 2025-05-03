@@ -4,7 +4,7 @@ ChronoVault AI module.
 Handles AI-driven processing, including face recognition and EXIF data
 extraction for image labeling.
 
-Author: [Your Name]
+Author: [chronomicron@gmail.com]
 Created: 2025-05-03
 """
 

@@ -4,12 +4,13 @@ ChronoVault main application.
 Entry point for the ChronoVault application. Loads and verifies all package
 modules (ui, scanner, database, ai, config) and initializes the app.
 
-Author: [Your Name]
+Author: [chronomicron@gmail.com]
 Created: 2025-05-03
 """
 
 import sys
 import importlib
+from PyQt5.QtWidgets import QApplication
 
 def verify_module(module_name, function_name):
     """Verify if a module and its function exist."""
@@ -38,19 +39,36 @@ def main():
     ]
 
     # Verify and test each module
+    test_functions = {}
     for module_name, function_name in modules:
         func = verify_module(module_name, function_name)
         if func:
             try:
                 print(f"Testing {module_name}: {func()}")
+                test_functions[module_name] = func
             except Exception as e:
                 assert False, f"Error executing {function_name} in {module_name}: {str(e)}"
         else:
             # Assertion already printed by verify_module
             continue
 
-    # Placeholder for app initialization
-    print("ChronoVault initialized successfully")
+    # Initialize PyQt application
+    app = QApplication(sys.argv)
+
+    # Set up UI if available
+    if "ui" in test_functions:
+        try:
+            ui_module = importlib.import_module("chronovault.ui")
+            window = ui_module.create_main_window()
+            scan_input, db_input = ui_module.setup_ui(window)
+            window.show()
+        except Exception as e:
+            assert False, f"Failed to initialize UI: {str(e)}"
+    else:
+        print("UI module not available, running in console mode")
+
+    # Run application
+    sys.exit(app.exec_())
 
 if __name__ == "__main__":
     main()

@@ -4,7 +4,7 @@ ChronoVault scanner module.
 Manages volume scanning, image identification, and multithreaded crawling to
 locate and process images.
 
-Author: [Your Name]
+Author: [chronomicron@gmail.com]
 Created: 2025-05-03
 """
 
