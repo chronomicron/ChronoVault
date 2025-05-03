@@ -53,6 +53,7 @@ ChronoVault/
 ├── LICENSE                   # MIT License
 ├── .gitignore                # Excludes unnecessary files from Git
 └── README.md                 # Project documentation
+
 Development
 ChronoVault is under active development. Key areas of focus include:
 
