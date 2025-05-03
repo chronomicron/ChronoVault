@@ -4,11 +4,11 @@ ChronoVault UI module.
 Handles the PyQt-based graphical user interface for ChronoVault, including
 window creation, buttons, and image display.
 
-Author: [chronomicron@gmail.com]
+Author: chronomicron@gmail.com
 Created: 2025-05-03
 """
 
-from PyQt5.QtWidgets import QMainWindow, QPushButton, QLineEdit, QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QLabel
+from PyQt5.QtWidgets import QMainWindow, QPushButton, QLineEdit, QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QLabel, QDialogButtonBox
 
 def init_ui():
     """Initialize the UI module."""
@@ -37,33 +37,38 @@ def setup_ui(window):
     scan_layout.addWidget(scan_button)
     layout.addLayout(scan_layout)
 
-    # Database location input
-    db_layout = QHBoxLayout()
-    db_label = QLabel("Database Location:")
-    db_input = QLineEdit()
-    db_input.setPlaceholderText("Select database file")
-    db_button = QPushButton("Browse")
-    db_button.clicked.connect(lambda: browse_file(db_input))
-    db_layout.addWidget(db_label)
-    db_layout.addWidget(db_input)
-    db_layout.addWidget(db_button)
-    layout.addLayout(db_layout)
+    # Image vault directory input
+    vault_layout = QHBoxLayout()
+    vault_label = QLabel("Image Vault Directory:")
+    vault_input = QLineEdit()
+    vault_input.setPlaceholderText("Select directory for database and image archive")
+    vault_button = QPushButton("Browse")
+    vault_button.clicked.connect(lambda: browse_directory(vault_input))
+    vault_layout.addWidget(vault_label)
+    vault_layout.addWidget(vault_input)
+    vault_layout.addWidget(vault_button)
+    layout.addLayout(vault_layout)
 
     # Central widget
     container = QWidget()
     container.setLayout(layout)
     window.setCentralWidget(container)
 
-    return scan_input, db_input
+    return scan_input, vault_input
 
 def browse_directory(line_edit):
-    """Open a directory selection dialog and update the line edit."""
-    directory = QFileDialog.getExistingDirectory(None, "Select Scan Directory")
-    if directory:
-        line_edit.setText(directory)
+    """Open a directory selection dialog with a 'Select Current Folder' button."""
+    dialog = QFileDialog(None, "Select Directory")
+    dialog.setFileMode(QFileDialog.Directory)
+    dialog.setOption(QFileDialog.ShowDirsOnly, True)
 
-def browse_file(line_edit):
-    """Open a file selection dialog and update the line edit."""
-    file_path, _ = QFileDialog.getOpenFileName(None, "Select Database File", "", "SQLite Database (*.db);;All Files (*)")
-    if file_path:
-        line_edit.setText(file_path)
+    # Add custom button to select current folder
+    button_box = dialog.findChild(QDialogButtonBox)
+    if button_box:
+        select_current = button_box.addButton("Select Current Folder", QDialogButtonBox.AcceptRole)
+        select_current.clicked.connect(dialog.accept)
+
+    if dialog.exec_():
+        selected_dir = dialog.selectedFiles()[0]
+        if selected_dir:
+            line_edit.setText(selected_dir)
