@@ -1,82 +1,51 @@
 ChronoVault
-Synopsis
-ChronoVault is a Python-based desktop application designed to streamline the organization and archiving of digital photos. It scans storage volumes (e.g., hard drives, USB drives) for images, extracts metadata, and organizes them into a timeline-based archive. Leveraging AI, ChronoVault automatically labels images with information such as people, locations, and dates, storing all metadata in a lightweight SQLite database for fast retrieval. A user-friendly PyQt interface allows users to select volumes, manage archives, and explore their photo collections.
-
+ChronoVault is a Python-based application designed to help you consolidate and organize photos from various storage devices. Whether your images are scattered across old computers, USB drives, or CDs, ChronoVault scans directories, archives images to a local database, and (in future updates) uses AI to label and categorize them by dates, people, or places. Built with PyQt5 for a user-friendly GUI and SQLite for metadata storage, it’s perfect for managing your photo collection.
+Motivation
+Over the years, I’ve captured countless photos stored across disparate devices—old computers, laptops, cameras, phones, hard drives, CDs, and DVDs. ChronoVault was born to solve this: an app that scans folders on any volume, USB, or network drive, copies images to a local database for management, and uses AI to label and organize them by people, places, or dates, making it easy to find cherished memories.
 Features
-Volume Scanning: Recursively scans storage volumes to locate images (e.g., JPG, JPEG, BMP, RAW).
-Metadata Extraction: Extracts EXIF data (e.g., date taken, GPS) for intelligent organization.
-AI-Powered Labeling: Uses face recognition and optional cloud APIs to tag images with people and locations.
-Database Storage: Stores metadata in SQLite for efficient searching and timeline views.
-Photo Archiving: Copies or moves images to an organized archive (e.g., ~/ChronoVault/Archive/YYYY/MM/).
-User Interface: PyQt-based GUI for selecting volumes, viewing progress, and browsing images.
-Configurable Options: User settings (e.g., archive location, copy/move preference) stored in a JSON file.
-Installation
-Clone the repository:
-bash
 
-Copy
+Graphical Interface: Select scan and vault directories using a PyQt5-based GUI.
+Database Management: Initialize an SQLite database to store image metadata, with folder structure creation (Vault/Database/ and Vault/Archive/).
+Persistent Settings: Save scan and vault paths in config.json for easy reuse.
+Status Updates: View progress and error messages in a built-in status window.
+In Development:
+Directory scanning to find images.
+AI-powered labeling for dates, people, and places.
+Image archiving to date-based folders (Vault/Archive/YYYY/MM/).
+
+
+
+Installation
+ChronoVault is developed and tested on Ubuntu. Follow these steps to set it up:
+
+Clone the repository (replace yourusername with your GitHub username):
 git clone https://github.com/yourusername/ChronoVault.git
 cd ChronoVault
-Create and activate a virtual environment:
-bash
 
-Copy
+
+Create and activate a virtual environment:
 python3 -m venv .venv
 source .venv/bin/activate
+
+
 Install dependencies:
-bash
-
-Copy
 pip install -r requirements.txt
-Run the application:
-bash
 
-Copy
+
+
+Usage
+Launch the application:
 python ChronoVault.py
-File Structure
-The project is organized into modular components for maintainability and scalability:
 
-text
 
-Copy
-ChronoVault/
-├── chronovault/
-│   ├── __init__.py             # Marks chronovault as a Python package
-│   ├── ui.py                  # PyQt GUI logic for user interaction
-│   ├── scanner.py            # File scanning and multithreaded crawling
-│   ├── database.py           # SQLite database operations for metadata storage
-│   ├── ai.py                 # AI processing (face recognition, EXIF extraction)
-│   └── config.py             # Constants (e.g., image extensions, archive path)
-├── ChronoVault.py            # Main application entry point
-├── config.json               # User options (e.g., archive directory, scan locations)
-├── requirements.txt          # Python dependencies
-├── LICENSE                   # MIT License
-├── .gitignore                # Excludes unnecessary files from Git
-└── README.md                 # Project documentation
+Scan Directory: Choose a folder or volume to scan for images (e.g., a USB drive or network share).
+Vault Directory: Select a directory to store the SQLite database (Vault/Database/chronovault.db) and archived images (Vault/Archive/).
+Test Database Integrity: Check if the database and archive folders exist, with an option to create them if missing.
+Start Scan: Currently outputs a placeholder message (scanning functionality in development).
 
-Development
-ChronoVault is under active development. Key areas of focus include:
-
-Implementing multithreaded scanning with temporary file output.
-Enhancing the database with metadata queries (e.g., by date, person).
-Adding AI features for face recognition and location tagging.
-Expanding the GUI with timeline views and user controls.
-To contribute:
-
-Fork the repository and create a feature branch:
-bash
-
-Copy
-git checkout -b feature/your-feature
-Commit changes and push:
-bash
-
-Copy
-git commit -m "Add your feature"
-git push origin feature/your-feature
-Open a pull request on GitHub.
+Project Status
+ChronoVault is under active development. Current features include a GUI for directory selection and database initialization. Upcoming features include image scanning, AI-based labeling, and date-organized archiving. Contributions and feedback are welcome!
 License
-This project is licensed under the MIT License. See the  file for details.
-
+This project is licensed under the MIT License - see the LICENSE file for details.
 Contact
-For questions, issues, or feature requests, please open an issue on GitHub or contact the maintainer at [chronomicron@gmail.com].
+For questions or suggestions, contact the author at chronomicron@gmail.com.
