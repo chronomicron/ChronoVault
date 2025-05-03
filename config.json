@@ -1,4 +1,6 @@
 {
+    "scan_dir": "/path/to/scan",
+    "vault_dir": "/path/to/vault",
     "archive_dir": "~/ChronoVault/Archive",
     "copy_not_move": true,
     "scan_locations": []

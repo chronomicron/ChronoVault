@@ -4,7 +4,7 @@ ChronoVault main application.
 Entry point for the ChronoVault application. Loads and verifies all package
 modules (ui, scanner, database, ai, config) and initializes the app.
 
-Author: [chronomicron@gmail.com]
+Author: chronomicron@gmail.com
 Created: 2025-05-03
 """
 
@@ -60,7 +60,7 @@ def main():
         try:
             ui_module = importlib.import_module("chronovault.ui")
             window = ui_module.create_main_window()
-            scan_input, db_input = ui_module.setup_ui(window)
+            scan_input, vault_input, test_db_button, start_scan_button, status_output = ui_module.setup_ui(window)
             window.show()
         except Exception as e:
             assert False, f"Failed to initialize UI: {str(e)}"
