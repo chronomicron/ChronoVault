@@ -38,21 +38,21 @@ The project is organized into modular components for maintainability and scalabi
 
 text
 
-Copy/n
-ChronoVault//n
-├── chronovault//n
-│   ├── __init__.py             # Marks chronovault as a Python package/n
-│   ├── ui.py                  # PyQt GUI logic for user interaction/n
-│   ├── scanner.py            # File scanning and multithreaded crawling/n
-│   ├── database.py           # SQLite database operations for metadata storage/n
-│   ├── ai.py                 # AI processing (face recognition, EXIF extraction)/n
-│   └── config.py             # Constants (e.g., image extensions, archive path)/n
-├── ChronoVault.py            # Main application entry point/n
-├── config.json               # User options (e.g., archive directory, scan locations)/n
-├── requirements.txt          # Python dependencies/n
-├── LICENSE                   # MIT License/n
-├── .gitignore                # Excludes unnecessary files from Git/n
-└── README.md                 # Project documentation/n
+Copy
+ChronoVault/
+├── chronovault/
+│   ├── __init__.py             # Marks chronovault as a Python package
+│   ├── ui.py                  # PyQt GUI logic for user interaction
+│   ├── scanner.py            # File scanning and multithreaded crawling
+│   ├── database.py           # SQLite database operations for metadata storage
+│   ├── ai.py                 # AI processing (face recognition, EXIF extraction)
+│   └── config.py             # Constants (e.g., image extensions, archive path)
+├── ChronoVault.py            # Main application entry point
+├── config.json               # User options (e.g., archive directory, scan locations)
+├── requirements.txt          # Python dependencies
+├── LICENSE                   # MIT License
+├── .gitignore                # Excludes unnecessary files from Git
+└── README.md                 # Project documentation
 
 Development
 ChronoVault is under active development. Key areas of focus include:
