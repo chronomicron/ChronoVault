@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (QMainWindow, QPushButton, QLineEdit, QVBoxLayout, Q
 from PyQt5.QtCore import Qt
 from pathlib import Path
 import chronovault.config as config
+import chronovault.database as database
 
 def init_ui():
     """Initialize the UI module."""
@@ -139,8 +140,8 @@ def test_database_integrity(vault_input, status_output):
             QMessageBox.Yes
         )
         if reply == QMessageBox.Yes:
-            append_status(status_output, "Database creation requested (not implemented yet)")
-            # TODO: Implement database creation in database.py
+            database.init_folders(vault_path, lambda msg: append_status(status_output, msg))
+            database.create_database(db_path, lambda msg: append_status(status_output, msg))
         else:
             append_status(status_output, "Database creation cancelled")
 
