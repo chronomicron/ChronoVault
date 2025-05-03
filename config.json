@@ -1,6 +1,6 @@
 {
-    "scan_dir": "/path/to/scan",
-    "vault_dir": "/path/to/vault",
+    "scan_dir": "/home/grou/Documents/Hungarian application",
+    "vault_dir": "/home/grou/Downloads/geckodriver-v0.36.0-linux64",
     "archive_dir": "~/ChronoVault/Archive",
     "copy_not_move": true,
     "scan_locations": []

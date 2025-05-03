@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import (QMainWindow, QPushButton, QLineEdit, QVBoxLayout, Q
                             QTextEdit, QFrame, QMessageBox)
 from PyQt5.QtCore import Qt
 from pathlib import Path
+import chronovault.config as config
 
 def init_ui():
     """Initialize the UI module."""
@@ -29,13 +30,19 @@ def setup_ui(window):
     """Set up the UI layout with widgets."""
     layout = QVBoxLayout()
 
+    # Load config
+    config_data = config.load_config()
+    scan_dir = config_data.get("scan_dir", "")
+    vault_dir = config_data.get("vault_dir", "")
+
     # Scan directory input
     scan_layout = QHBoxLayout()
     scan_label = QLabel("Scan Directory:")
     scan_input = QLineEdit()
     scan_input.setPlaceholderText("Select directory to scan")
+    scan_input.setText(scan_dir)
     scan_button = QPushButton("Browse")
-    scan_button.clicked.connect(lambda: browse_directory(scan_input))
+    scan_button.clicked.connect(lambda: browse_directory(scan_input, status_output, is_scan_dir=True))
     scan_layout.addWidget(scan_label)
     scan_layout.addWidget(scan_input)
     scan_layout.addWidget(scan_button)
@@ -46,8 +53,9 @@ def setup_ui(window):
     vault_label = QLabel("Image Vault Directory:")
     vault_input = QLineEdit()
     vault_input.setPlaceholderText("Select directory for database and image archive")
+    vault_input.setText(vault_dir)
     vault_button = QPushButton("Browse")
-    vault_button.clicked.connect(lambda: browse_directory(vault_input))
+    vault_button.clicked.connect(lambda: browse_directory(vault_input, status_output, is_scan_dir=False))
     vault_layout.addWidget(vault_label)
     vault_layout.addWidget(vault_input)
     vault_layout.addWidget(vault_button)
@@ -58,7 +66,7 @@ def setup_ui(window):
     test_db_button = QPushButton("Test Database Integrity")
     test_db_button.clicked.connect(lambda: test_database_integrity(vault_input, status_output))
     start_scan_button = QPushButton("Start Scan")
-    start_scan_button.clicked.connect(lambda: append_status(status_output, "Start Scan button pressed"))
+    start_scan_button.clicked.connect(lambda: start_scan(scan_input, vault_input, status_output))
     action_layout.addWidget(test_db_button)
     action_layout.addWidget(start_scan_button)
     layout.addLayout(action_layout)
@@ -81,7 +89,7 @@ def setup_ui(window):
 
     return scan_input, vault_input, test_db_button, start_scan_button, status_output
 
-def browse_directory(line_edit):
+def browse_directory(line_edit, status_output, is_scan_dir):
     """Open a directory selection dialog with a 'Select Current Folder' button."""
     dialog = QFileDialog(None, "Select Directory")
     dialog.setFileMode(QFileDialog.Directory)
@@ -97,6 +105,11 @@ def browse_directory(line_edit):
         selected_dir = dialog.selectedFiles()[0]
         if selected_dir:
             line_edit.setText(selected_dir)
+            config_data = config.load_config()
+            key = "scan_dir" if is_scan_dir else "vault_dir"
+            config_data[key] = selected_dir
+            config.save_config(config_data)
+            append_status(status_output, f"{'Scan' if is_scan_dir else 'Vault'} directory updated: {selected_dir}")
 
 def append_status(status_output, message):
     """Append a message to the status output area."""
@@ -136,3 +149,13 @@ def test_database_integrity(vault_input, status_output):
         append_status(status_output, "Image library found: " + str(archive_path))
     else:
         append_status(status_output, "Image library not found: " + str(archive_path))
+
+def start_scan(scan_input, vault_input, status_output):
+    """Handle Start Scan button press."""
+    append_status(status_output, "Start Scan button pressed")
+    # Save current paths to config
+    config_data = config.load_config()
+    config_data["scan_dir"] = scan_input.text()
+    config_data["vault_dir"] = vault_input.text()
+    config.save_config(config_data)
+    append_status(status_output, "Scan and vault directories saved to config")
