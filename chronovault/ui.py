@@ -163,6 +163,30 @@ def test_database_integrity(vault_input, status_output):
 def start_scan(scan_input, vault_input, status_output, status_emitter):
     """Handle Start Scan button press."""
     append_status(status_output, "Start Scan initiated")
+
+    # Validate vault directory and database
+    vault_path = vault_input.text()
+    if not vault_path:
+        append_status(status_output, "Error: No vault directory selected")
+        return
+    vault_dir = Path(vault_path)
+    db_path = vault_dir / "Database" / "chronovault.db"
+    if not db_path.exists():
+        append_status(status_output, "Error: No database found at " + str(db_path))
+        reply = QMessageBox.question(
+            None,
+            "Create Database",
+            f"No database found at {db_path}. Create one to proceed with scanning?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        if reply == QMessageBox.Yes:
+            database.init_folders(vault_path, lambda msg: append_status(status_output, msg))
+            database.create_database(db_path, lambda msg: append_status(status_output, msg))
+        else:
+            append_status(status_output, "Error: Scan cancelled, database required")
+            return
+
     # Save current paths to config
     config_data = config.load_config()
     config_data["scan_dir"] = scan_input.text()

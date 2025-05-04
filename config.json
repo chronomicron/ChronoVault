@@ -1,6 +1,6 @@
 {
-    "scan_dir": "/root",
-    "vault_dir": "/home/grou/workspace/ChronoVault/.venv/bin",
+    "scan_dir": "/home/grou/Documents/ChronoVaultTestFolder",
+    "vault_dir": "/home/grou/Documents/ChronoVaultTestFolder2",
     "archive_dir": "~/ChronoVault/Archive",
     "copy_not_move": true,
     "scan_locations": [],
