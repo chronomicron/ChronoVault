@@ -16,6 +16,7 @@ from pathlib import Path
 import chronovault.config as config
 import chronovault.database as database
 import chronovault.scanner as scanner
+import chronovault.archiver as archiver
 
 class StatusEmitter(QObject):
     """Emitter for thread-safe status updates."""
@@ -199,5 +200,28 @@ def start_scan(scan_input, vault_input, status_output, status_emitter):
     if not scan_dir:
         append_status(status_output, "Error: No scan directory selected")
         return
-    scanner.scan_directory(scan_dir, status_emitter.status_updated.emit)
+    scanner.scan_directory(scan_dir, vault_path, status_emitter.status_updated.emit)
+
+    # Prompt for copying images
+    reply = QMessageBox.question(
+        None,
+        "Copy Images",
+        "Copy found images to vault archive?",
+        QMessageBox.Yes | QMessageBox.No,
+        QMessageBox.Yes
+    )
+    if reply == QMessageBox.Yes:
+        delete_originals = QMessageBox.question(
+            None,
+            "Delete Originals",
+            "Delete original images after copying?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        ) == QMessageBox.Yes
+        append_status(status_output, "Starting image copying")
+        archiver.copy_images(vault_path, delete_originals, status_emitter.status_updated.emit)
+        append_status(status_output, "Image copying completed")
+    else:
+        append_status(status_output, "Image copying skipped")
+    
     append_status(status_output, "Scan completed")

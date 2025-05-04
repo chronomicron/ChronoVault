@@ -25,7 +25,8 @@ MODULES = {
     "scanner": "chronovault.scanner",
     "database": "chronovault.database",
     "ai": "chronovault.ai",
-    "config": "chronovault.config"
+    "config": "chronovault.config",
+    "archiver": "chronovault.archiver"
 }
 
 def test_module(module_name, function_name="init"):

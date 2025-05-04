@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import chronovault.config as config
+import chronovault.archiver as archiver
 import logging
 
 # Set up logging
@@ -21,7 +22,7 @@ def init_scanner():
     """Initialize the scanner module."""
     return "Scanner module initialized"
 
-def scan_directory(scan_dir, status_callback):
+def scan_directory(scan_dir, vault_dir, status_callback):
     """Recursively scan a directory for images and store results in a temporary file."""
     logging.info(f"Starting scan of {scan_dir}")
     try:
