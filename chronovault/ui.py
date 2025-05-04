@@ -11,10 +11,15 @@ Created: 2025-05-03
 from PyQt5.QtWidgets import (QMainWindow, QPushButton, QLineEdit, QVBoxLayout, QWidget, 
                             QFileDialog, QHBoxLayout, QLabel, QDialogButtonBox, 
                             QTextEdit, QFrame, QMessageBox)
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QObject, pyqtSignal
 from pathlib import Path
 import chronovault.config as config
 import chronovault.database as database
+import chronovault.scanner as scanner
+
+class StatusEmitter(QObject):
+    """Emitter for thread-safe status updates."""
+    status_updated = pyqtSignal(str)
 
 def init_ui():
     """Initialize the UI module."""
@@ -67,7 +72,7 @@ def setup_ui(window):
     test_db_button = QPushButton("Test Database Integrity")
     test_db_button.clicked.connect(lambda: test_database_integrity(vault_input, status_output))
     start_scan_button = QPushButton("Start Scan")
-    start_scan_button.clicked.connect(lambda: start_scan(scan_input, vault_input, status_output))
+    start_scan_button.clicked.connect(lambda: start_scan(scan_input, vault_input, status_output, status_emitter))
     action_layout.addWidget(test_db_button)
     action_layout.addWidget(start_scan_button)
     layout.addLayout(action_layout)
@@ -83,12 +88,16 @@ def setup_ui(window):
     status_frame.setLayout(status_layout)
     layout.addWidget(status_frame)
 
+    # Set up thread-safe status updates
+    status_emitter = StatusEmitter()
+    status_emitter.status_updated.connect(lambda msg: append_status(status_output, msg))
+
     # Central widget
     container = QWidget()
     container.setLayout(layout)
     window.setCentralWidget(container)
 
-    return scan_input, vault_input, test_db_button, start_scan_button, status_output
+    return scan_input, vault_input, test_db_button, start_scan_button, status_output, status_emitter
 
 def browse_directory(line_edit, status_output, is_scan_dir):
     """Open a directory selection dialog with a 'Select Current Folder' button."""
@@ -151,12 +160,20 @@ def test_database_integrity(vault_input, status_output):
     else:
         append_status(status_output, "Image library not found: " + str(archive_path))
 
-def start_scan(scan_input, vault_input, status_output):
+def start_scan(scan_input, vault_input, status_output, status_emitter):
     """Handle Start Scan button press."""
-    append_status(status_output, "Start Scan button pressed")
+    append_status(status_output, "Start Scan initiated")
     # Save current paths to config
     config_data = config.load_config()
     config_data["scan_dir"] = scan_input.text()
     config_data["vault_dir"] = vault_input.text()
     config.save_config(config_data)
     append_status(status_output, "Scan and vault directories saved to config")
+
+    # Start the scan
+    scan_dir = scan_input.text()
+    if not scan_dir:
+        append_status(status_output, "Error: No scan directory selected")
+        return
+    scanner.scan_directory(scan_dir, status_emitter.status_updated.emit)
+    append_status(status_output, "Scan completed")

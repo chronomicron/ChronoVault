@@ -1,74 +1,63 @@
 """
 ChronoVault main application.
 
-Entry point for the ChronoVault application. Loads and verifies all package
-modules (ui, scanner, database, ai, config) and initializes the app.
+Initializes and runs the PyQt-based GUI for scanning, archiving, and managing
+images.
 
 Author: chronomicron@gmail.com
 Created: 2025-05-03
 """
 
 import sys
-import importlib
+import os
+from importlib import import_module
 from PyQt5.QtWidgets import QApplication
+import logging
 
-def verify_module(module_name, function_name):
-    """Verify if a module and its function exist."""
+# Set Qt platform to X11 to avoid Wayland issues
+os.environ["QT_QPA_PLATFORM"] = "xcb"
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+MODULES = {
+    "ui": "chronovault.ui",
+    "scanner": "chronovault.scanner",
+    "database": "chronovault.database",
+    "ai": "chronovault.ai",
+    "config": "chronovault.config"
+}
+
+def test_module(module_name, function_name="init"):
+    """Test a module by calling its init function."""
     try:
-        module = importlib.import_module(f"chronovault.{module_name}")
-        if hasattr(module, function_name):
-            func = getattr(module, function_name)
-            return func
-        else:
-            assert False, f"Function {function_name} not found in {module_name}"
-    except ImportError as e:
-        assert False, f"Failed to load module {module_name}: {str(e)}"
+        module = import_module(MODULES[module_name])
+        func = getattr(module, f"{function_name}_{module_name}")
+        logging.info(f"Testing {module_name}: {func()}")
     except Exception as e:
-        assert False, f"Error in module {module_name}: {str(e)}"
-    return None
+        logging.error(f"Error executing {function_name} in {module_name}: {str(e)}")
+        raise
 
 def main():
-    """Initialize and run ChronoVault."""
-    # List of modules and their init functions
-    modules = [
-        ("ui", "init_ui"),
-        ("scanner", "init_scanner"),
-        ("database", "init_database"),
-        ("ai", "init_ai"),
-        ("config", "get_config")
-    ]
-
-    # Verify and test each module
-    test_functions = {}
-    for module_name, function_name in modules:
-        func = verify_module(module_name, function_name)
-        if func:
-            try:
-                print(f"Testing {module_name}: {func()}")
-                test_functions[module_name] = func
-            except Exception as e:
-                assert False, f"Error executing {function_name} in {module_name}: {str(e)}"
-        else:
-            # Assertion already printed by verify_module
-            continue
+    """Main function to initialize and run ChronoVault."""
+    # Test all modules
+    for module_name in MODULES:
+        test_module(module_name)
+    logging.info("All modules initialized successfully")
 
     # Initialize PyQt application
     app = QApplication(sys.argv)
 
-    # Set up UI if available
-    if "ui" in test_functions:
-        try:
-            ui_module = importlib.import_module("chronovault.ui")
-            window = ui_module.create_main_window()
-            scan_input, vault_input, test_db_button, start_scan_button, status_output = ui_module.setup_ui(window)
-            window.show()
-        except Exception as e:
-            assert False, f"Failed to initialize UI: {str(e)}"
-    else:
-        print("UI module not available, running in console mode")
-
-    # Run application
-    sys.exit(app.exec_())
+    # Set up UI
+    try:
+        ui_module = import_module(MODULES["ui"])
+        window = ui_module.create_main_window()
+        scan_input, vault_input, test_db_button, start_scan_button, status_output, status_emitter = ui_module.setup_ui(window)
+        window.show()
+        sys.exit(app.exec_())
+    except Exception as e:
+        logging.error(f"Failed to initialize UI: {str(e)}")
+        raise
 
 if __name__ == "__main__":
     main()
