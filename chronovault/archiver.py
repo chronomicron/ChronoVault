@@ -6,6 +6,7 @@ using EXIF data and stores metadata in the database.
 
 Author: chronomicron@gmail.com
 Created: 2025-05-04
+Version: 1.0.0
 """
 
 import json

@@ -5,6 +5,7 @@ Manages loading and saving configuration settings from a JSON file.
 
 Author: chronomicron@gmail.com
 Created: 2025-05-03
+Version: 1.0.0
 """
 
 import json
