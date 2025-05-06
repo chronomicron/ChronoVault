@@ -1,83 +1,105 @@
 """
 ChronoVault database module.
 
-Handles initialization and management of the SQLite database for storing
-image metadata.
+Manages the SQLite database for storing image metadata.
 
 Author: chronomicron@gmail.com
 Created: 2025-05-03
+Version: 1.0.3
 """
 
 import sqlite3
-from pathlib import Path
 import logging
-
-# Set up logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+from pathlib import Path
 
 def init_database():
     """Initialize the database module."""
     return "Database module initialized"
 
-def init_folders(vault_path, status_callback):
-    """Create necessary folders for database and archive."""
-    vault_dir = Path(vault_path)
+def init_folders(vault_dir, status_callback):
+    """Initialize the database and archive folders in the vault directory."""
+    vault_dir = Path(vault_dir)
     db_dir = vault_dir / "Database"
     archive_dir = vault_dir / "Archive"
+    unknown_dir = archive_dir / "Unknown"
 
     try:
         db_dir.mkdir(parents=True, exist_ok=True)
         archive_dir.mkdir(parents=True, exist_ok=True)
-        status_callback(f"Creating vault folders: {vault_path}")
-        logging.info(f"Created vault folders: {vault_path}")
+        unknown_dir.mkdir(parents=True, exist_ok=True)
+        status_callback(f"Initialized folders: {db_dir}, {archive_dir}, {unknown_dir}")
     except Exception as e:
-        status_callback(f"Error: Failed to create vault folders: {e}")
-        logging.error(f"Failed to create vault folders: {e}")
-        raise
+        status_callback(f"Error initializing folders: {e}")
 
 def create_database(db_path, status_callback):
     """Create the SQLite database with an images table."""
     try:
-        db_path = Path(db_path)
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS images (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_path TEXT NOT NULL,
+                    date_taken TEXT,
+                    file_creation_date TEXT,
+                    camera_model TEXT,
+                    shooting_mode TEXT,
+                    image_quality TEXT,
+                    metering_mode TEXT,
+                    af_mode TEXT,
+                    exposure_compensation TEXT,
+                    white_balance TEXT,
+                    picture_style TEXT,
+                    shutter_speed TEXT,
+                    aperture TEXT,
+                    focal_length TEXT,
+                    iso TEXT,
+                    gps_data TEXT,
+                    ai_labels TEXT
+                )
+            """)
+            conn.commit()
+            status_callback(f"Database created at {db_path}")
+    except Exception as e:
+        status_callback(f"Error creating database: {e}")
 
-        # Create images table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS images (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                file_path TEXT NOT NULL,
-                creation_date TEXT,
-                camera_model TEXT,
-                resolution TEXT
-            )
-        """)
-        conn.commit()
-        status_callback(f"Database created: {db_path}")
-        logging.info(f"Database created: {db_path}")
-    except sqlite3.Error as e:
-        status_callback(f"Error: Failed to create database: {e}")
-        logging.error(f"Failed to create database: {e}")
-        raise
-    finally:
-        if conn:
-            conn.close()
-
-def insert_image(db_path, file_path, creation_date, camera_model, resolution, status_callback):
+def insert_image_metadata(db_path, image_info, status_callback):
     """Insert image metadata into the database."""
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO images (file_path, creation_date, camera_model, resolution)
-            VALUES (?, ?, ?, ?)
-        """, (str(file_path), creation_date, camera_model, resolution))
-        conn.commit()
-        status_callback(f"Inserted image metadata: {file_path}")
-        logging.info(f"Inserted image metadata: {file_path}")
-    except sqlite3.Error as e:
-        status_callback(f"Error: Failed to insert image metadata for {file_path}: {e}")
-        logging.error(f"Failed to insert image metadata for {file_path}: {e}")
-    finally:
-        if conn:
-            conn.close()
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO images (
+                    file_path, date_taken, file_creation_date, camera_model,
+                    shooting_mode, image_quality, metering_mode, af_mode,
+                    exposure_compensation, white_balance, picture_style,
+                    shutter_speed, aperture, focal_length, iso, gps_data,
+                    ai_labels
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                image_info["relative_path"],
+                image_info["date_taken"],
+                image_info["file_creation_date"],
+                image_info["camera_model"],
+                image_info["shooting_mode"],
+                image_info["image_quality"],
+                image_info["metering_mode"],
+                image_info["af_mode"],
+                image_info["exposure_compensation"],
+                image_info["white_balance"],
+                image_info["picture_style"],
+                image_info["shutter_speed"],
+                image_info["aperture"],
+                image_info["focal_length"],
+                image_info["iso"],
+                image_info["gps_data"],
+                image_info.get("ai_labels", "")  # Ensure ai_labels is included
+            ))
+            conn.commit()
+            status_callback(f"Inserted image metadata: {image_info['relative_path']}")
+    except Exception as e:
+        status_callback(f"Error inserting image metadata: {e}")
+
+def init_module():
+    """Initialize the database module (for compatibility)."""
+    return init_database()

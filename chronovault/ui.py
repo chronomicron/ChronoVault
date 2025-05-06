@@ -6,6 +6,7 @@ window creation, buttons, and image display.
 
 Author: chronomicron@gmail.com
 Created: 2025-05-03
+Version: 1.0.1
 """
 
 from PyQt5.QtWidgets import (QMainWindow, QPushButton, QLineEdit, QVBoxLayout, QWidget, 
@@ -186,7 +187,7 @@ def start_scan(scan_input, vault_input, status_output, status_emitter):
             database.create_database(db_path, lambda msg: append_status(status_output, msg))
         else:
             append_status(status_output, "Error: Scan cancelled, database required")
-            return
+        return
 
     # Save current paths to config
     config_data = config.load_config()
@@ -200,6 +201,7 @@ def start_scan(scan_input, vault_input, status_output, status_emitter):
     if not scan_dir:
         append_status(status_output, "Error: No scan directory selected")
         return
+
     scanner.scan_directory(scan_dir, vault_path, status_emitter.status_updated.emit)
 
     # Prompt for copying images
@@ -223,5 +225,9 @@ def start_scan(scan_input, vault_input, status_output, status_emitter):
         append_status(status_output, "Image copying completed")
     else:
         append_status(status_output, "Image copying skipped")
-    
+
     append_status(status_output, "Scan completed")
+
+def init_module():
+    """Initialize the UI module (for compatibility)."""
+    return init_ui()
