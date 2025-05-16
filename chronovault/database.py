@@ -11,6 +11,7 @@ Version History:
     v1.0.2 (2025-05-13): Added thread-safe queue for database insertions.
     v1.0.3 (2025-05-13): Added init_folders for vault directory setup.
     v1.0.4 (2025-05-13): Added create_database for UI compatibility.
+    v1.0.5 (2025-05-16): Fixed db_worker to catch queue.Empty exception.
 """
 
 import sqlite3
@@ -18,6 +19,7 @@ import logging
 from pathlib import Path
 from queue import Queue
 import threading
+import queue
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -147,7 +149,7 @@ def db_worker():
                 logging.error(f"Error inserting image metadata: {e}")
             finally:
                 insert_queue.task_done()
-        except Queue.Empty:
+        except queue.Empty:
             continue
 
 def enqueue_insert(db_path, image_info, status_callback):

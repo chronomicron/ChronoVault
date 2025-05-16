@@ -1,228 +1,357 @@
 """
 ChronoVault UI module.
 
-Handles the PyQt-based graphical user interface for ChronoVault, including
-window creation, buttons, and image display.
+Provides a PyQt-based GUI for managing image scanning, archiving, and database operations.
 
 Author: chronomicron@gmail.com
 Created: 2025-05-03
-Version: 1.0.0
+Version History:
+    v1.0.0 (2025-05-03): Initial version with automated workflow.
+    v1.0.1 (2025-05-16): Revamped UI with manual phase buttons and three-section layout.
+    v1.0.2 (2025-05-16): Added shutil import for copy_images_to_archive.
+    v1.0.3 (2025-05-16): Consolidated EXIF extraction and database insertion into copy_images_to_archive, removed update_database.
 """
 
-from PyQt5.QtWidgets import (QMainWindow, QPushButton, QLineEdit, QVBoxLayout, QWidget, 
-                            QFileDialog, QHBoxLayout, QLabel, QDialogButtonBox, 
-                            QTextEdit, QFrame, QMessageBox)
-from PyQt5.QtCore import Qt, QObject, pyqtSignal
+import sys
+import logging
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QLineEdit, QPushButton, QFileDialog, QTextEdit, QFrame, QMessageBox
+)
+from PyQt5.QtCore import Qt, pyqtSignal
 from pathlib import Path
-import chronovault.config as config
-import chronovault.database as database
 import chronovault.scanner as scanner
 import chronovault.archiver as archiver
+import chronovault.database as database
+import json
+import shutil
+from datetime import datetime
+import time
 
-class StatusEmitter(QObject):
-    """Emitter for thread-safe status updates."""
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+class StatusEmitter(QWidget):
+    """Custom widget to emit status updates for thread-safe GUI updates."""
     status_updated = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
 
 def init_ui():
     """Initialize the UI module."""
     return "UI module initialized"
 
+def append_status(status_output, message):
+    """Append a status message to the QTextEdit."""
+    status_output.append(message)
+    status_output.ensureCursorVisible()
+    QApplication.processEvents()
+
+def browse_directory(line_edit):
+    """Open a file dialog to select a directory and update the QLineEdit."""
+    directory = QFileDialog.getExistingDirectory(None, "Select Directory")
+    if directory:
+        line_edit.setText(directory)
+
+def test_database_integrity(vault_input, status_output):
+    """Test database existence and folder structure."""
+    vault_path = vault_input.text().strip()
+    if not vault_path:
+        append_status(status_output, "Error: Vault directory not specified")
+        return
+
+    db_path = Path(vault_path) / "Database" / "chronovault.db"
+    try:
+        database.create_database(db_path, lambda msg: append_status(status_output, msg))
+        database.test_database_integrity(db_path, lambda msg: append_status(status_output, msg))
+    except Exception as e:
+        append_status(status_output, f"Error testing database: {e}")
+        logging.error(f"Error testing database: {e}")
+
+def search_images(scan_input, vault_input, status_output):
+    """Scan for images and write to scan_results.json."""
+    scan_dir = scan_input.text().strip()
+    vault_dir = vault_input.text().strip()
+    if not scan_dir:
+        append_status(status_output, "Error: Scan directory not specified")
+        return
+    if not vault_dir:
+        append_status(status_output, "Error: Vault directory not specified")
+        return
+
+    try:
+        scanner.scan_directory(scan_dir, vault_dir, lambda msg: append_status(status_output, msg))
+    except Exception as e:
+        append_status(status_output, f"Error scanning images: {e}")
+        logging.error(f"Error scanning images: {e}")
+
+def copy_images_to_archive(vault_input, status_output):
+    """Copy images to archive and insert EXIF data into database."""
+    vault_dir = vault_input.text().strip()
+    if not vault_dir:
+        append_status(status_output, "Error: Vault directory not specified")
+        return
+
+    temp_file = Path("scan_results.json")
+    if not temp_file.exists():
+        append_status(status_output, "Error: No scan results found")
+        return
+
+    try:
+        with temp_file.open('r') as f:
+            results = json.load(f)
+        images = [item["original_path"] for item in results]
+        scanned_count = len(images)
+        append_status(status_output, f"Found {scanned_count} images in scan results")
+
+        vault_path = Path(vault_dir)
+        archive_path = vault_path / "Archive"
+        db_path = vault_path / "Database" / "chronovault.db"
+        copied_count = 0
+        current_year = datetime.now().year
+        min_year = 1970  # Unix epoch start
+
+        for image_path in images:
+            src_path = Path(image_path)
+            if not src_path.exists():
+                append_status(status_output, f"Skipping non-existent image: {src_path}")
+                logging.warning(f"Skipping non-existent image: {src_path}")
+                continue
+
+            # Step 1: Read EXIF data
+            try:
+                date_taken, camera_model, resolution = archiver.extract_exif_data(src_path)
+                exif_data = {
+                    "camera_model": camera_model or "Unknown",
+                    "image_quality": resolution or "Unknown",
+                    "shooting_mode": "",
+                    "metering_mode": "",
+                    "af_mode": "",
+                    "exposure_compensation": "",
+                    "white_balance": "",
+                    "picture_style": "",
+                    "shutter_speed": "",
+                    "aperture": "",
+                    "focal_length": "",
+                    "iso": "",
+                    "gps_data": "",
+                    "ai_labels": ""
+                }
+            except Exception as e:
+                append_status(status_output, f"Error reading EXIF data for {src_path}: {e}")
+                logging.error(f"Error reading EXIF data for {src_path}: {e}")
+                exif_data = {
+                    "camera_model": "Unknown",
+                    "image_quality": "Unknown",
+                    "shooting_mode": "",
+                    "metering_mode": "",
+                    "af_mode": "",
+                    "exposure_compensation": "",
+                    "white_balance": "",
+                    "picture_style": "",
+                    "shutter_speed": "",
+                    "aperture": "",
+                    "focal_length": "",
+                    "iso": "",
+                    "gps_data": "",
+                    "ai_labels": ""
+                }
+                date_taken = None
+
+            # Step 2: Determine date taken
+            if date_taken:
+                year = date_taken.year
+                if year < min_year or year > current_year:
+                    append_status(status_output, f"Unreasonable date {date_taken} for {src_path}, trying fallback")
+                    logging.warning(f"Unreasonable date {date_taken} for {src_path}")
+                    date_taken = None
+
+            if not date_taken:
+                # Fallback to file modification time
+                try:
+                    mtime = src_path.stat().st_mtime
+                    date_taken = datetime.fromtimestamp(mtime)
+                    year = date_taken.year
+                    if year < min_year or year > current_year:
+                        append_status(status_output, f"Unreasonable file date {date_taken} for {src_path}, using Unknown")
+                        logging.warning(f"Unreasonable file date {date_taken} for {src_path}")
+                        date_taken = None
+                except Exception as e:
+                    append_status(status_output, f"Error getting file date for {src_path}: {e}")
+                    logging.error(f"Error getting file date for {src_path}: {e}")
+                    date_taken = None
+
+            # Step 3: Determine destination folder
+            if date_taken:
+                year, month, day = date_taken.strftime("%Y"), date_taken.strftime("%m"), date_taken.strftime("%d")
+                dest_dir = archive_path / year / month / day
+                creation_date = date_taken.strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                dest_dir = archive_path / "Unknown"
+                creation_date = "Unknown"
+
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest_path = archiver.get_unique_dest_path(dest_dir, src_path.name)
+
+            # Step 4: Copy image
+            try:
+                shutil.copy2(src_path, dest_path)
+                append_status(status_output, f"Copied image to {dest_path}")
+                logging.info(f"Copied image to {dest_path}")
+            except Exception as e:
+                append_status(status_output, f"Error copying {src_path} to {dest_path}: {e}")
+                logging.error(f"Error copying {src_path} to {dest_path}: {e}")
+                continue  # Skip database insertion if copy fails
+
+            # Step 5: Insert EXIF data into database
+            try:
+                image_info = {
+                    "relative_path": str(dest_path.relative_to(vault_path)),
+                    "date_taken": creation_date,
+                    "file_creation_date": creation_date,
+                    **exif_data
+                }
+                database.enqueue_insert(db_path, image_info, lambda msg: append_status(status_output, msg))
+                copied_count += 1
+            except Exception as e:
+                append_status(status_output, f"Error inserting {dest_path} into database: {e}")
+                logging.error(f"Error inserting {dest_path} into database: {e}")
+
+        # Wait for database queue to drain
+        database.insert_queue.join()
+        append_status(status_output, f"Copied and stored {copied_count}/{scanned_count} images")
+        if copied_count != scanned_count:
+            append_status(status_output, f"Warning: Not all images processed ({copied_count}/{scanned_count})")
+    except Exception as e:
+        append_status(status_output, f"Error processing images: {e}")
+        logging.error(f"Error processing images: {e}")
+
+def delete_original_images(status_output):
+    """Delete original images after user confirmation."""
+    temp_file = Path("scan_results.json")
+    if not temp_file.exists():
+        append_status(status_output, "Error: No scan results found")
+        return
+
+    reply = QMessageBox.question(
+        None, "Confirm Deletion",
+        "Are you sure you want to delete the original images?",
+        QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+    )
+    if reply != QMessageBox.Yes:
+        append_status(status_output, "Deletion cancelled by user")
+        return
+
+    try:
+        with temp_file.open('r') as f:
+            results = json.load(f)
+        images = [item["original_path"] for item in results]
+        deleted_count = 0
+
+        for image_path in images:
+            src_path = Path(image_path)
+            if src_path.exists():
+                try:
+                    src_path.unlink()
+                    append_status(status_output, f"Deleted original image: {src_path}")
+                    deleted_count += 1
+                except Exception as e:
+                    append_status(status_output, f"Error deleting {src_path}: {e}")
+            else:
+                append_status(status_output, f"Skipping non-existent image: {src_path}")
+
+        append_status(status_output, f"Deleted {deleted_count}/{len(images)} original images")
+    except Exception as e:
+        append_status(status_output, f"Error deleting original images: {e}")
+        logging.error(f"Error deleting original images: {e}")
+
 def create_main_window():
-    """Create and configure the main PyQt window."""
+    """Create the main application window."""
     window = QMainWindow()
     window.setWindowTitle("ChronoVault")
-    window.setGeometry(100, 100, 600, 400)
+    window.setGeometry(100, 100, 800, 600)
     return window
 
 def setup_ui(window):
-    """Set up the UI layout with widgets."""
-    layout = QVBoxLayout()
+    """Set up the UI components."""
+    central_widget = QWidget()
+    window.setCentralWidget(central_widget)
+    main_layout = QVBoxLayout(central_widget)
 
-    # Load config
-    config_data = config.load_config()
-    scan_dir = config_data.get("scan_dir", "")
-    vault_dir = config_data.get("vault_dir", "")
+    # Directory Input Section
+    dir_frame = QFrame()
+    dir_frame.setFrameShape(QFrame.Box)
+    dir_frame.setFrameShadow(QFrame.Raised)
+    dir_layout = QVBoxLayout(dir_frame)
 
-    # Scan directory input
+    # Scan Directory
     scan_layout = QHBoxLayout()
     scan_label = QLabel("Scan Directory:")
     scan_input = QLineEdit()
-    scan_input.setPlaceholderText("Select directory to scan")
-    scan_input.setText(scan_dir)
-    scan_button = QPushButton("Browse")
-    scan_button.clicked.connect(lambda: browse_directory(scan_input, status_output, is_scan_dir=True))
+    scan_browse = QPushButton("Browse")
+    scan_browse.clicked.connect(lambda: browse_directory(scan_input))
     scan_layout.addWidget(scan_label)
     scan_layout.addWidget(scan_input)
-    scan_layout.addWidget(scan_button)
-    layout.addLayout(scan_layout)
+    scan_layout.addWidget(scan_browse)
+    dir_layout.addLayout(scan_layout)
 
-    # Image vault directory input
+    # Vault Directory
     vault_layout = QHBoxLayout()
     vault_label = QLabel("Image Vault Directory:")
     vault_input = QLineEdit()
-    vault_input.setPlaceholderText("Select directory for database and image archive")
-    vault_input.setText(vault_dir)
-    vault_button = QPushButton("Browse")
-    vault_button.clicked.connect(lambda: browse_directory(vault_input, status_output, is_scan_dir=False))
+    vault_browse = QPushButton("Browse")
+    vault_browse.clicked.connect(lambda: browse_directory(vault_input))
     vault_layout.addWidget(vault_label)
     vault_layout.addWidget(vault_input)
-    vault_layout.addWidget(vault_button)
-    layout.addLayout(vault_layout)
+    vault_layout.addWidget(vault_browse)
+    dir_layout.addLayout(vault_layout)
 
-    # Action buttons
-    action_layout = QHBoxLayout()
-    test_db_button = QPushButton("Test Database Integrity")
+    main_layout.addWidget(dir_frame)
+
+    # Action Buttons Section
+    action_frame = QFrame()
+    action_frame.setFrameShape(QFrame.Box)
+    action_frame.setFrameShadow(QFrame.Raised)
+    action_layout = QVBoxLayout(action_frame)
+
+    test_db_button = QPushButton("Test Database")
     test_db_button.clicked.connect(lambda: test_database_integrity(vault_input, status_output))
-    start_scan_button = QPushButton("Start Scan")
-    start_scan_button.clicked.connect(lambda: start_scan(scan_input, vault_input, status_output, status_emitter))
     action_layout.addWidget(test_db_button)
-    action_layout.addWidget(start_scan_button)
-    layout.addLayout(action_layout)
 
-    # Status output area
+    search_button = QPushButton("Search Images")
+    search_button.clicked.connect(lambda: search_images(scan_input, vault_input, status_output))
+    action_layout.addWidget(search_button)
+
+    copy_button = QPushButton("Import Images into Archive")
+    copy_button.clicked.connect(lambda: copy_images_to_archive(vault_input, status_output))
+    action_layout.addWidget(copy_button)
+
+    delete_button = QPushButton("Remove Images from Original Location")
+    delete_button.clicked.connect(lambda: delete_original_images(status_output))
+    action_layout.addWidget(delete_button)
+
+    main_layout.addWidget(action_frame)
+
+    # Status Output Section
     status_frame = QFrame()
-    status_frame.setFrameShape(QFrame.StyledPanel)
-    status_layout = QVBoxLayout()
+    status_frame.setFrameShape(QFrame.Box)
+    status_frame.setFrameShadow(QFrame.Raised)
+    status_layout = QVBoxLayout(status_frame)
+
     status_output = QTextEdit()
     status_output.setReadOnly(True)
-    status_output.setFixedHeight(150)
     status_layout.addWidget(status_output)
-    status_frame.setLayout(status_layout)
-    layout.addWidget(status_frame)
 
-    # Set up thread-safe status updates
+    main_layout.addWidget(status_frame)
+
     status_emitter = StatusEmitter()
     status_emitter.status_updated.connect(lambda msg: append_status(status_output, msg))
 
-    # Central widget
-    container = QWidget()
-    container.setLayout(layout)
-    window.setCentralWidget(container)
+    return scan_input, vault_input, test_db_button, search_button, status_output, status_emitter
 
-    return scan_input, vault_input, test_db_button, start_scan_button, status_output, status_emitter
-
-def browse_directory(line_edit, status_output, is_scan_dir):
-    """Open a directory selection dialog with a 'Select Current Folder' button."""
-    dialog = QFileDialog(None, "Select Directory")
-    dialog.setFileMode(QFileDialog.Directory)
-    dialog.setOption(QFileDialog.ShowDirsOnly, True)
-
-    # Add custom button to select current folder
-    button_box = dialog.findChild(QDialogButtonBox)
-    if button_box:
-        select_current = button_box.addButton("Select Current Folder", QDialogButtonBox.AcceptRole)
-        select_current.clicked.connect(dialog.accept)
-
-    if dialog.exec_():
-        selected_dir = dialog.selectedFiles()[0]
-        if selected_dir:
-            line_edit.setText(selected_dir)
-            config_data = config.load_config()
-            key = "scan_dir" if is_scan_dir else "vault_dir"
-            config_data[key] = selected_dir
-            config.save_config(config_data)
-            append_status(status_output, f"{'Scan' if is_scan_dir else 'Vault'} directory updated: {selected_dir}")
-
-def append_status(status_output, message):
-    """Append a message to the status output area."""
-    status_output.append(f"[INFO] {message}")
-
-def test_database_integrity(vault_input, status_output):
-    """Check if database and image library exist in the vault directory."""
-    vault_path = vault_input.text()
-    if not vault_path:
-        append_status(status_output, "Error: No vault directory selected")
-        return
-
-    vault_dir = Path(vault_path)
-    db_path = vault_dir / "Database" / "chronovault.db"
-    archive_path = vault_dir / "Archive"
-
-    # Check database
-    if db_path.exists():
-        append_status(status_output, "Database found: " + str(db_path))
-    else:
-        append_status(status_output, "Database not found: " + str(db_path))
-        reply = QMessageBox.question(
-            None,
-            "Create Database",
-            f"No database found at {db_path}. Create one?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes
-        )
-        if reply == QMessageBox.Yes:
-            database.init_folders(vault_path, lambda msg: append_status(status_output, msg))
-            database.create_database(db_path, lambda msg: append_status(status_output, msg))
-        else:
-            append_status(status_output, "Database creation cancelled")
-
-    # Check image library
-    if archive_path.exists():
-        append_status(status_output, "Image library found: " + str(archive_path))
-    else:
-        append_status(status_output, "Image library not found: " + str(archive_path))
-
-def start_scan(scan_input, vault_input, status_output, status_emitter):
-    """Handle Start Scan button press."""
-    append_status(status_output, "Start Scan initiated")
-
-    # Validate vault directory and database
-    vault_path = vault_input.text()
-    if not vault_path:
-        append_status(status_output, "Error: No vault directory selected")
-        return
-    vault_dir = Path(vault_path)
-    db_path = vault_dir / "Database" / "chronovault.db"
-    if not db_path.exists():
-        append_status(status_output, "Error: No database found at " + str(db_path))
-        reply = QMessageBox.question(
-            None,
-            "Create Database",
-            f"No database found at {db_path}. Create one to proceed with scanning?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes
-        )
-        if reply == QMessageBox.Yes:
-            database.init_folders(vault_path, lambda msg: append_status(status_output, msg))
-            database.create_database(db_path, lambda msg: append_status(status_output, msg))
-        else:
-            append_status(status_output, "Error: Scan cancelled, database required")
-            return
-
-    # Save current paths to config
-    config_data = config.load_config()
-    config_data["scan_dir"] = scan_input.text()
-    config_data["vault_dir"] = vault_input.text()
-    config.save_config(config_data)
-    append_status(status_output, "Scan and vault directories saved to config")
-
-    # Start the scan
-    scan_dir = scan_input.text()
-    if not scan_dir:
-        append_status(status_output, "Error: No scan directory selected")
-        return
-    scanner.scan_directory(scan_dir, vault_path, status_emitter.status_updated.emit)
-
-    # Prompt for copying images
-    reply = QMessageBox.question(
-        None,
-        "Copy Images",
-        "Copy found images to vault archive?",
-        QMessageBox.Yes | QMessageBox.No,
-        QMessageBox.Yes
-    )
-    if reply == QMessageBox.Yes:
-        delete_originals = QMessageBox.question(
-            None,
-            "Delete Originals",
-            "Delete original images after copying?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        ) == QMessageBox.Yes
-        append_status(status_output, "Starting image copying")
-        archiver.copy_images(vault_path, delete_originals, status_emitter.status_updated.emit)
-        append_status(status_output, "Image copying completed")
-    else:
-        append_status(status_output, "Image copying skipped")
-    
-    append_status(status_output, "Scan completed")
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = create_main_window()
+    scan_input, vault_input, test_db_button, start_scan_button, status_output, status_emitter = setup_ui(window)
+    window.show()
+    sys.exit(app.exec_())
