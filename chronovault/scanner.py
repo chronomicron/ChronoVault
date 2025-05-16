@@ -5,7 +5,11 @@ Scans directories for images, extracts EXIF data, and saves results.
 
 Author: chronomicron@gmail.com
 Created: 2025-05-03
-Version: 1.0.1
+Version History:
+    v1.0.0 (2025-05-03): Initial version with PIL-based EXIF extraction.
+    v1.0.1 (2025-05-03): Added JSON-serializable EXIF handling.
+    v1.0.2 (2025-05-13): Fixed GPS parsing for piexif data.
+    v1.0.3 (2025-05-13): Fixed incomplete GPS DMS tuple handling.
 """
 
 import logging
@@ -16,6 +20,8 @@ from PIL import Image
 from PIL.ExifTags import TAGS
 from datetime import datetime
 from PIL.TiffImagePlugin import IFDRational
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 def init_scanner():
     """Initialize the scanner module."""
@@ -73,19 +79,44 @@ def parse_gps_data(exif_data):
         return None
     try:
         gps_info = exif_data["GPSInfo"]
-        lat = gps_info.get(2)
-        lat_ref = gps_info.get(1)
-        lon = gps_info.get(4)
-        lon_ref = gps_info.get(3)
+        # Handle piexif GPS data (tuple of tuples for lat/lon)
+        if isinstance(gps_info, dict):
+            lat = gps_info.get(2)  # GPSLatitude
+            lat_ref = gps_info.get(1, "N")  # GPSLatitudeRef
+            lon = gps_info.get(4)  # GPSLongitude
+            lon_ref = gps_info.get(3, "E")  # GPSLongitudeRef
+        else:
+            # Assume piexif tuple format
+            lat = gps_info[2] if len(gps_info) > 2 else None
+            lat_ref = gps_info[1] if len(gps_info) > 1 else "N"
+            lon = gps_info[4] if len(gps_info) > 4 else None
+            lon_ref = gps_info[3] if len(gps_info) > 3 else "E"
+
         if not all([lat, lat_ref, lon, lon_ref]):
+            logging.warning("Incomplete GPS data")
             return None
-        lat = float(lat[0]) + float(lat[1]) / 60 + float(lat[2]) / 3600
-        lon = float(lon[0]) + float(lon[1]) / 60 + float(lon[2]) / 3600
+
+        # Validate DMS tuples
+        if not (isinstance(lat, (tuple, list)) and isinstance(lon, (tuple, list))):
+            logging.warning("Invalid GPS DMS format")
+            return None
+        if len(lat) != 3 or len(lon) != 3:
+            logging.warning(f"Invalid GPS DMS tuple length: lat={len(lat)}, lon={len(lon)}")
+            return None
+
+        # Convert DMS to decimal degrees
+        def dms_to_decimal(dms):
+            degrees, minutes, seconds = dms
+            return float(degrees) + float(minutes) / 60 + float(seconds) / 3600
+
+        lat_decimal = dms_to_decimal(lat)
+        lon_decimal = dms_to_decimal(lon)
         if lat_ref == "S":
-            lat = -lat
+            lat_decimal = -lat_decimal
         if lon_ref == "W":
-            lon = -lon
-        return f"{lat:.6f},{lon:.6f}"
+            lon_decimal = -lon_decimal
+
+        return f"{lat_decimal:.6f},{lon_decimal:.6f}"
     except Exception as e:
         logging.warning(f"Error parsing GPS data: {e}")
         return None

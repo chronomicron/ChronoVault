@@ -1,6 +1,6 @@
 {
-    "scan_dir": "/home/grou/Documents/ChronoVaultPhotoTestFolder",
-    "vault_dir": "/home/grou/Documents/ChronoVaultArchiveTestFolder",
+    "scan_dir": "/home/grou/Documents/ChronoVaultTestScan",
+    "vault_dir": "/home/grou/Documents/ChronoVaultDatabase_1",
     "archive_dir": "~/ChronoVault/Archive",
     "copy_not_move": true,
     "scan_locations": [],
