@@ -10,6 +10,7 @@ Version History:
     v1.0.1 (2025-05-16): Revamped UI with manual phase buttons and three-section layout.
     v1.0.2 (2025-05-16): Added shutil import for copy_images_to_archive.
     v1.0.3 (2025-05-16): Consolidated EXIF extraction and database insertion into copy_images_to_archive, removed update_database.
+    v1.0.4 (2025-05-16): Added heartbeat during database writes to prevent app hanging.
 """
 
 import sys
@@ -18,7 +19,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QFileDialog, QTextEdit, QFrame, QMessageBox
 )
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from pathlib import Path
 import chronovault.scanner as scanner
 import chronovault.archiver as archiver
@@ -217,8 +218,20 @@ def copy_images_to_archive(vault_input, status_output):
                 append_status(status_output, f"Error inserting {dest_path} into database: {e}")
                 logging.error(f"Error inserting {dest_path} into database: {e}")
 
-        # Wait for database queue to drain
+        # Wait for database queue to drain with heartbeat
+        append_status(status_output, "Processing database insertions...")
+        timer = QTimer()
+        def update_progress():
+            remaining = database.insert_queue.qsize()
+            processed = scanned_count - remaining
+            append_status(status_output, f"Processing database insertions... {processed}/{scanned_count} images stored")
+            QApplication.processEvents()
+            if database.insert_queue.qsize() == 0:
+                timer.stop()
+        timer.timeout.connect(update_progress)
+        timer.start(1000)  # Update every second
         database.insert_queue.join()
+        timer.stop()
         append_status(status_output, f"Copied and stored {copied_count}/{scanned_count} images")
         if copied_count != scanned_count:
             append_status(status_output, f"Warning: Not all images processed ({copied_count}/{scanned_count})")

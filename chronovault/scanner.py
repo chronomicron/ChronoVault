@@ -10,6 +10,7 @@ Version History:
     v1.0.1 (2025-05-03): Added JSON-serializable EXIF handling.
     v1.0.2 (2025-05-13): Fixed GPS parsing for piexif data.
     v1.0.3 (2025-05-13): Fixed incomplete GPS DMS tuple handling.
+    v1.0.4 (2025-05-16): Added image counter to scan_directory output.
 """
 
 import logging
@@ -126,6 +127,7 @@ def scan_directory(scan_dir, vault_dir, status_callback):
     scan_dir = Path(scan_dir)
     vault_dir = Path(vault_dir)
     results = []
+    image_count = 0
 
     status_callback(f"Starting scan of {scan_dir}")
 
@@ -159,6 +161,7 @@ def scan_directory(scan_dir, vault_dir, status_callback):
                     "ai_labels": ""
                 }
                 results.append(image_info)
+                image_count += 1
                 status_callback(f"Found image: {file_path}")
             except Exception as e:
                 status_callback(f"Error processing {file_path}: {e}")
@@ -167,10 +170,6 @@ def scan_directory(scan_dir, vault_dir, status_callback):
     try:
         with output_file.open("w") as f:
             json.dump(results, f, indent=4)
-        status_callback(f"Scan results saved to {output_file}")
+        status_callback(f"{image_count} images found, scan results saved to {output_file}")
     except Exception as e:
         status_callback(f"Error saving scan results: {e}")
-
-def init_module():
-    """Initialize the scanner module (for compatibility)."""
-    return init_scanner()
