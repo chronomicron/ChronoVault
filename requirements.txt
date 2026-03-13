@@ -1,0 +1,6 @@
+# ChronoVault - Python Dependencies
+# Minimum viable set for initial development (v0.1.x)
+# Install with:  pip install -r requirements.txt
+
+PyQt5>=5.15.9          # GUI framework
+Pillow>=10.0.0         # Image processing, EXIF reading, future thumbnails
