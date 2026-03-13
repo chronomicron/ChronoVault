@@ -1,109 +1,97 @@
-# 📸 ChronoVault
+# ChronoVault ⏳📸
 
-**ChronoVault** is a Python-based application designed to help you **consolidate and organize photos** from various storage devices. Whether your images are scattered across old computers, USB drives, or CDs, ChronoVault scans directories, archives images to a local database, and *(in future updates)* uses AI to label and categorize them by **dates, people, or places**.
+**Personal Photo Time Vault**  
+A modular, privacy-first photo management tool that scans scattered drives and folders, extracts metadata (EXIF, GPS, etc.), archives images chronologically into a clean vault structure (YYYY/MM/DD), and offers an intuitive browsing interface with powerful metadata viewing.
 
-Built with **PyQt5** for a user-friendly GUI and **SQLite** for metadata storage, it’s perfect for managing your photo collection.
-
----
-
-## 🚀 Motivation
-
-Over the years, I’ve captured countless photos stored across disparate devices—old computers, laptops, cameras, phones, hard drives, CDs, and DVDs.
-
-**ChronoVault** was born to solve this:  
-An app that scans folders on any volume, USB, or network drive, **copies images to a local database**, and uses AI to label and organize them by **people, places, or dates**—making it easy to find cherished memories.
+**Current Development Branch:** `rewrite` (v2 redesign – modular architecture, modern PyQt5 GUI, CLI support)
 
 ---
 
-## ✨ Features
+## 🎯 Project Goals
 
-- **Graphical Interface**  
-  Select scan and vault directories using a PyQt5-based GUI.
-
-- **Database Management**  
-  Initialize an SQLite database to store image metadata, with folder structure creation (`Vault/Database/` and `Vault/Archive/`).
-
-- **Persistent Settings**  
-  Save scan and vault paths in `config.json` for easy reuse.
-
-- **Status Updates**  
-  View progress and error messages in a built-in status window.
-
-### 🧪 In Development
-
-- Directory scanning to find images.
-- AI-powered labeling for **dates**, **people**, and **places**.
-- Image archiving to date-based folders (`Vault/Archive/YYYY/MM/`).
+- **Organize chaos** → Gather photos from multiple drives, external HDDs, old backups  
+- **Preserve truth** → Never alter originals; keep full EXIF, GPS, and file metadata  
+- **Chronological-first** → Browse and navigate by actual capture date (not file modification time)  
+- **Modular & extensible** → Swap scanner logic, add AI tagging, change storage backends easily  
+- **Dual access** → Full-featured GUI + standalone CLI tools (scan, archive, query)  
+- **No cloud** → 100% local — SQLite database, your photos never leave your machine  
 
 ---
 
-## 🛠️ Installation
+## 🚀 Current Status (Rewrite Branch)
 
-ChronoVault is developed and tested on **Ubuntu**. Follow these steps to set it up:
+- **Version:** 0.1.x (initial modular skeleton)  
+- **Focus:** Core module separation, placeholder files with versioned headers, CLI + GUI foundation  
+- **Tech stack (planned):** Python 3.10+, PyQt5, Pillow, SQLite3  
 
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/ChronoVault.git
+---
+
+## 📂 Project Structure (v0.1)
+ChronoVault/
+├── main.py                # Entry point: launches GUI or runs CLI commands
+├── config.py              # Loads/saves app settings (JSON) – paths, threads, preferences
+├── scanner.py             # Scans directories for images/videos, extracts EXIF → list/JSON
+├── archiver.py            # Copies files to vault (YYYY/MM/DD), handles duplicates & deletes
+├── database.py            # SQLite interface – insert, query by date/range/tags, metadata
+├── ai.py                  # Placeholder for future image labeling / tagging (ML stub)
+├── ui.py                  # PyQt5 GUI: folder tree, thumbnail grid, metadata sidebar
+├── utils.py               # Shared helpers: EXIF parsing, thumbnail gen, logging, date utils
+├── test_cases.py          # Generates fake photos with EXIF for development & testing
+└── requirements.txt       # Dependencies: PyQt5, Pillow, ...
+text### Module Descriptions
+
+| File              | Role / Responsibility                                                                 | CLI Capable? | GUI Integration |
+|-------------------|---------------------------------------------------------------------------------------|--------------|-----------------|
+| `main.py`         | App launcher – CLI argument parser + GUI startup                                      | Yes          | Yes             |
+| `config.py`       | Centralized configuration (scan/vault paths, threads, file types, etc.)               | Yes          | Yes             |
+| `scanner.py`      | Directory traversal, media detection, EXIF extraction → structured output             | Yes          | Yes             |
+| `archiver.py`     | Threaded archiving to date-based folders, duplicate handling, optional delete originals | Yes       | Yes             |
+| `database.py`     | SQLite CRUD operations: photos table + indexes on date, path, tags                    | Indirect     | Yes             |
+| `ai.py`           | Future: face detection, object recognition, auto-tagging                              | Yes (later)  | Yes (later)     |
+| `ui.py`           | Full PyQt5 interface: tree view, chrono-aware grid, metadata panel, filters           | No           | Core            |
+| `utils.py`        | Reusable helpers used by multiple modules (EXIF, thumbnails, safe file ops, etc.)     | Yes          | Yes             |
+| `test_cases.py`   | Creates mock directory trees + images with controlled EXIF for reproducible testing   | Yes          | No              |
+
+---
+
+## 🔢 Versioning Convention (File Headers)
+
+Each Python file begins with a header containing a simple changelog:
+
+```python
+# ChronoVault - [Module Name]
+# Description: Short explanation of purpose and main interactions
+#
+# Version History:
+#   0.1.1 – Initial placeholder file
+#   0.1.2 – Added basic function signatures
+#   0.2.1 – Introduced threading support (major feature)
+
+Patch (0.1.x) → small fixes, refinements, docstrings, argument tweaks
+Minor (0.x.1) → new functions, important behavior change, new dependency
+Major (x.1.1) → big architectural shift, new core feature, major refactor
+
+We only increment versions on meaningful changes — not every commit or typo fix.
+
+🛠️ Getting Started (Development)
+
+Clone & switch to the rewrite branchBashgit clone https://github.com/chronomicron/ChronoVault.git
 cd ChronoVault
+git checkout rewrite
+Install dependenciesBashpip install -r requirements.txt
+Run the GUIBashpython main.py
+Run a standalone scan (example)Bashpython main.py --scan /path/to/photos --output scan.json
 
-# Create and activate a virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
 
-# Install dependencies
-pip install -r requirements.txt
-```
+🗺️ Next Milestones (Planned)
 
----
+ v0.2.x – Basic GUI layout (splitter panes, thumbnail grid, metadata panel)
+ v0.3.x – Scanner + Archiver integration in GUI
+ v0.4.x – Chronological timeline / calendar view in UI
+ v0.5.x – Database population & query-powered browsing
+ v1.0.0 – First usable release (full scan → archive → browse loop)
 
-## ▶️ Usage
 
-```bash
-python ChronoVault.py
-```
-
-**Basic Workflow:**
-
-1. **Scan Directory**  
-   Choose a folder or volume to scan for images (e.g., a USB drive or network share).
-
-2. **Vault Directory**  
-   Select a directory to store the SQLite database and archived images:
-   - `Vault/Database/chronovault.db`
-   - `Vault/Archive/`
-
-3. **Test Database Integrity**  
-   Check if the database and archive folders exist, with an option to create them if missing.
-
-4. **Start Scan**  
-   Currently outputs a placeholder message *(scanning functionality in development)*.
-
----
-
-## 📈 Project Status
-
-ChronoVault is **under active development**.
-
-Current features:
-- GUI for directory selection
-- Database initialization
-
-Upcoming features:
-- Image scanning
-- AI-based labeling
-- Date-organized archiving
-
-**Contributions and feedback are welcome!**
-
----
-
-## 📄 License
-
-This project is licensed under the **MIT License** – see the [LICENSE](LICENSE) file for details.
-
----
-
-## 📬 Contact
-
-For questions or suggestions, contact the author at:  
-📧 **chronomicron@gmail.com**
+Made with ❤️ for anyone trying to tame 20+ years of scattered family photos.
+Questions, ideas, or want to contribute?
+→ Open an issue or pull request!
