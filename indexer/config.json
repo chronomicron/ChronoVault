@@ -1,4 +1,5 @@
 {
+    "database_path": "located_files.db",
     "extensions": [
         "jpg",
         "jpeg",
