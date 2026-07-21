@@ -5,7 +5,12 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 from PIL import Image
-from PIL.ExifTags import TAGS
+from PIL.ExifTags import TAGS, GPSTAGS
+
+# No digital camera existed before this date, so any "date taken" earlier
+# than this is treated as implausible. (Also happens to be the author's
+# birthday -- also predates digital cameras. Small tribute, not a bug.)
+EARLIEST_PLAUSIBLE_DATE = datetime(1972, 7, 26)
 
 
 def load_config(config_file):
@@ -17,19 +22,17 @@ def load_config(config_file):
         archive_root = config.get('archive_root')
         extensions = config.get('extensions_to_copy', [])
 
-        # Optional filters -- all have safe defaults so existing configs
-        # keep working exactly as before if these keys are absent.
         min_file_size_bytes = config.get('min_file_size_bytes', 0)
         max_file_size_bytes = config.get('max_file_size_bytes', None)  # None = no upper limit
         require_exif = config.get('require_exif', False)
         exclude_path_contains = config.get('exclude_path_contains', [])
 
-        # Thumbnail handling. Cameras (esp. Canon) create .THM sidecar thumbnail
-        # files alongside videos/photos -- these can be useful to keep as a trace
-        # of a deleted original, so they're excluded by default rather than
-        # silently dropped at indexing time.
         exclude_thumbnails = config.get('exclude_thumbnails', True)
         thumbnail_extensions = config.get('thumbnail_extensions', ['thm'])
+
+        # How many days of disagreement between EXIF date and filesystem
+        # creation date before we flag the file as date_uncertain.
+        date_mismatch_threshold_days = config.get('date_mismatch_threshold_days', 1)
 
         if not database_path or not archive_root:
             print("Error: 'database_path' and 'archive_root' must be specified in config.")
@@ -45,6 +48,7 @@ def load_config(config_file):
                 ext.lower() if ext.startswith('.') else '.' + ext.lower()
                 for ext in thumbnail_extensions
             ],
+            'date_mismatch_threshold_days': date_mismatch_threshold_days,
         }
 
         return database_path, archive_root, extensions, filters
@@ -73,24 +77,40 @@ def init_archive_database(archive_root):
             file_extension TEXT,
             file_size INTEGER,
             date_taken TEXT,
-            date_added TEXT
+            date_source TEXT,
+            filesystem_creation_date TEXT,
+            date_uncertain INTEGER DEFAULT 0,
+            date_added TEXT,
+            camera_make TEXT,
+            camera_model TEXT,
+            gps_latitude REAL,
+            gps_longitude REAL,
+            aperture TEXT,
+            iso_speed TEXT,
+            focal_length_mm TEXT
         )
     ''')
     conn.commit()
     return conn, archive_db_path
 
 
-def add_to_archive_database(conn, archive_path, source_path, file_extension, file_size, date_taken):
+def add_to_archive_database(conn, record):
     """Insert a record for a newly copied file into archive_database."""
     cursor = conn.cursor()
-    date_added = datetime.now().isoformat()
-    date_taken_str = date_taken.isoformat() if date_taken else None
-
     cursor.execute('''
         INSERT OR IGNORE INTO archive_files
-        (archive_path, source_path, file_extension, file_size, date_taken, date_added)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (str(archive_path), str(source_path), file_extension, file_size, date_taken_str, date_added))
+        (archive_path, source_path, file_extension, file_size,
+         date_taken, date_source, filesystem_creation_date, date_uncertain, date_added,
+         camera_make, camera_model, gps_latitude, gps_longitude,
+         aperture, iso_speed, focal_length_mm)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        record['archive_path'], record['source_path'], record['file_extension'], record['file_size'],
+        record['date_taken'], record['date_source'], record['filesystem_creation_date'],
+        record['date_uncertain'], record['date_added'],
+        record['camera_make'], record['camera_model'], record['gps_latitude'], record['gps_longitude'],
+        record['aperture'], record['iso_speed'], record['focal_length_mm']
+    ))
     conn.commit()
 
 
@@ -103,25 +123,90 @@ def get_exif_data(file_path):
         return None
 
 
-def get_photo_date_from_exif(exif_data):
-    """Pull DateTimeOriginal or DateTimeDigitized out of an already-loaded EXIF dict."""
+def get_readable_exif(exif_data):
+    """Convert a raw EXIF dict into a {tag_name: value} dict for easy lookups."""
     if not exif_data:
+        return {}
+    return {TAGS.get(tag_id, tag_id): value for tag_id, value in exif_data.items()}
+
+
+def convert_gps_to_decimal(gps_coord, gps_ref):
+    """Convert an EXIF GPS (degrees, minutes, seconds) tuple to decimal degrees."""
+    try:
+        degrees, minutes, seconds = gps_coord
+        decimal = float(degrees) + float(minutes) / 60 + float(seconds) / 3600
+        if gps_ref in ('S', 'W'):
+            decimal = -decimal
+        return decimal
+    except Exception:
         return None
-    for tag_id, value in exif_data.items():
-        tag_name = TAGS.get(tag_id, tag_id)
-        if tag_name == "DateTimeOriginal" and value:
-            return datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
-        if tag_name == "DateTimeDigitized" and value:
-            return datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
-    return None
 
 
-def get_photo_date(file_path, exif_data):
-    """Determine date: EXIF first, then fall back to file system creation date."""
-    exif_date = get_photo_date_from_exif(exif_data)
-    if exif_date:
-        return exif_date
+def get_gps_coordinates(readable_exif):
+    """Extract latitude/longitude from EXIF GPSInfo, if present."""
+    gps_info = readable_exif.get('GPSInfo')
+    if not gps_info:
+        return None, None
 
+    gps_tags = {GPSTAGS.get(key, key): value for key, value in gps_info.items()}
+
+    lat = gps_tags.get('GPSLatitude')
+    lat_ref = gps_tags.get('GPSLatitudeRef')
+    lon = gps_tags.get('GPSLongitude')
+    lon_ref = gps_tags.get('GPSLongitudeRef')
+
+    latitude = convert_gps_to_decimal(lat, lat_ref) if lat and lat_ref else None
+    longitude = convert_gps_to_decimal(lon, lon_ref) if lon and lon_ref else None
+
+    return latitude, longitude
+
+
+def get_camera_info(readable_exif):
+    """Extract camera make/model/aperture/iso/focal length from EXIF, where present."""
+    camera_make = readable_exif.get('Make')
+    camera_model = readable_exif.get('Model')
+
+    aperture = readable_exif.get('FNumber')
+    if aperture is not None:
+        try:
+            aperture = f"f/{float(aperture):.1f}"
+        except Exception:
+            aperture = str(aperture)
+
+    iso_speed = readable_exif.get('ISOSpeedRatings')
+    if iso_speed is not None:
+        iso_speed = str(iso_speed)
+
+    focal_length = readable_exif.get('FocalLength')
+    if focal_length is not None:
+        try:
+            focal_length = f"{float(focal_length):.1f}mm"
+        except Exception:
+            focal_length = str(focal_length)
+
+    return (
+        str(camera_make).strip() if camera_make else None,
+        str(camera_model).strip() if camera_model else None,
+        aperture,
+        iso_speed,
+        focal_length,
+    )
+
+
+def get_photo_date_from_exif(readable_exif):
+    """Pull DateTimeOriginal or DateTimeDigitized out of a readable EXIF dict."""
+    for tag_name in ('DateTimeOriginal', 'DateTimeDigitized'):
+        value = readable_exif.get(tag_name)
+        if value:
+            try:
+                return datetime.strptime(value, "%Y:%m:%d %H:%M:%S"), tag_name
+            except ValueError:
+                continue
+    return None, None
+
+
+def get_filesystem_creation_date(file_path):
+    """File system creation date, used as a fallback and for cross-checking EXIF."""
     try:
         stat = Path(file_path).stat()
         return datetime.fromtimestamp(stat.st_ctime)
@@ -129,15 +214,55 @@ def get_photo_date(file_path, exif_data):
         return None
 
 
-def get_archive_path(file_path, archive_root, photo_date):
-    """Determine the archive destination path based on photo date."""
-    if not photo_date:
-        print(f"Warning: Could not determine date for {file_path}, using current date")
-        photo_date = datetime.now()
+def determine_date_info(file_path, readable_exif, mismatch_threshold_days):
+    """
+    Work out the date to use for archiving a file, where that date came from,
+    and whether it should be flagged as uncertain.
 
-    year = photo_date.strftime("%Y")
-    month = photo_date.strftime("%m")
-    day = photo_date.strftime("%d")
+    Returns a dict with: date_taken, date_source, filesystem_creation_date, date_uncertain
+    """
+    exif_date, exif_tag = get_photo_date_from_exif(readable_exif)
+    fs_date = get_filesystem_creation_date(file_path)
+
+    date_uncertain = False
+
+    if exif_date:
+        date_taken = exif_date
+        date_source = 'exif_original' if exif_tag == 'DateTimeOriginal' else 'exif_digitized'
+
+        # Trigger 3: EXIF date and filesystem date disagree by more than the threshold.
+        if fs_date:
+            delta_days = abs((exif_date - fs_date).days)
+            if delta_days > mismatch_threshold_days:
+                date_uncertain = True
+    else:
+        # Trigger 1: no EXIF date at all -- falling back to filesystem date.
+        date_taken = fs_date
+        date_source = 'filesystem_fallback'
+        date_uncertain = True
+
+    # Trigger 2: implausible date -- before digital cameras existed, or in the future.
+    if date_taken:
+        if date_taken < EARLIEST_PLAUSIBLE_DATE or date_taken > datetime.now():
+            date_uncertain = True
+
+    return {
+        'date_taken': date_taken,
+        'date_source': date_source,
+        'filesystem_creation_date': fs_date,
+        'date_uncertain': date_uncertain,
+    }
+
+
+def get_archive_path(file_path, archive_root, date_taken):
+    """Determine the archive destination path based on the resolved date."""
+    if not date_taken:
+        print(f"Warning: Could not determine any date for {file_path}, using current date")
+        date_taken = datetime.now()
+
+    year = date_taken.strftime("%Y")
+    month = date_taken.strftime("%m")
+    day = date_taken.strftime("%d")
 
     archive_dir = Path(archive_root) / year / month / day
     archive_dir.mkdir(parents=True, exist_ok=True)
@@ -228,9 +353,8 @@ def get_files_to_copy(db_path, extensions):
     """
     Retrieve files from database that match the extensions and are still eligible
     to be processed. 'located' and 'excluded' are both eligible, since filters
-    (min/max size, require_exif, exclude_path_contains) can change between runs
-    and a previously-excluded file may pass on a later run. Only 'imported' files
-    are considered permanently done and are skipped.
+    can change between runs and a previously-excluded file may pass on a later
+    run. Only 'imported' files are considered permanently done and are skipped.
     """
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
@@ -284,7 +408,8 @@ def main():
           f"require_exif={filters['require_exif']}, "
           f"exclude_path_contains={filters['exclude_path_contains']}, "
           f"exclude_thumbnails={filters['exclude_thumbnails']} "
-          f"({filters['thumbnail_extensions']})")
+          f"({filters['thumbnail_extensions']}), "
+          f"date_mismatch_threshold_days={filters['date_mismatch_threshold_days']}")
 
     archive_conn, archive_db_path = init_archive_database(archive_root)
     print(f"Archive database: {archive_db_path}")
@@ -293,7 +418,7 @@ def main():
     files = get_files_to_copy(database_path, extensions)
 
     if not files:
-        print("No files to copy. (Nothing with status 'located' matches your extensions.)")
+        print("No files to copy. (Nothing with status 'located' or 'excluded' matches your extensions.)")
         archive_conn.close()
         return
 
@@ -304,6 +429,7 @@ def main():
     failed = 0
     skipped_missing = 0
     excluded = 0
+    uncertain_dates = 0
 
     for idx, (file_id, file_path) in enumerate(files, 1):
         progress_label = f"[{idx}/{len(files)}]"
@@ -315,12 +441,10 @@ def main():
             continue
 
         file_size = source.stat().st_size
+        raw_exif = get_exif_data(source)
+        readable_exif = get_readable_exif(raw_exif)
 
-        # Only attempt EXIF read if require_exif is on or we need it for dating anyway;
-        # cheap enough to just always try for image-like files.
-        exif_data = get_exif_data(source)
-
-        passes, reason = check_filters(source, file_size, exif_data, filters)
+        passes, reason = check_filters(source, file_size, raw_exif, filters)
         if not passes:
             print(f"{progress_label} EXCLUDED: {file_path} ({reason})")
             update_file_status(database_path, file_id, 'excluded')
@@ -329,15 +453,45 @@ def main():
 
         print(f"{progress_label} {file_path} ({format_size(file_size)})")
 
-        photo_date = get_photo_date(source, exif_data)
-        dest = get_archive_path(file_path, archive_root, photo_date)
+        date_info = determine_date_info(source, readable_exif, filters['date_mismatch_threshold_days'])
+        date_taken = date_info['date_taken']
+        dest = get_archive_path(file_path, archive_root, date_taken)
         file_extension = source.suffix.lower()
+
+        camera_make, camera_model, aperture, iso_speed, focal_length = get_camera_info(readable_exif)
+        gps_latitude, gps_longitude = get_gps_coordinates(readable_exif)
 
         if copy_file_with_progress(source, dest, file_size):
             update_file_status(database_path, file_id, 'imported')
-            add_to_archive_database(archive_conn, dest, source, file_extension, file_size, photo_date)
-            print(f"    OK -> {dest}")
+
+            record = {
+                'archive_path': dest,
+                'source_path': source,
+                'file_extension': file_extension,
+                'file_size': file_size,
+                'date_taken': date_taken.isoformat() if date_taken else None,
+                'date_source': date_info['date_source'],
+                'filesystem_creation_date': (
+                    date_info['filesystem_creation_date'].isoformat()
+                    if date_info['filesystem_creation_date'] else None
+                ),
+                'date_uncertain': 1 if date_info['date_uncertain'] else 0,
+                'date_added': datetime.now().isoformat(),
+                'camera_make': camera_make,
+                'camera_model': camera_model,
+                'gps_latitude': gps_latitude,
+                'gps_longitude': gps_longitude,
+                'aperture': aperture,
+                'iso_speed': iso_speed,
+                'focal_length_mm': focal_length,
+            }
+            add_to_archive_database(archive_conn, record)
+
+            uncertain_tag = " [UNCERTAIN DATE]" if date_info['date_uncertain'] else ""
+            print(f"    OK -> {dest}{uncertain_tag}")
             copied += 1
+            if date_info['date_uncertain']:
+                uncertain_dates += 1
         else:
             print("    FAILED")
             failed += 1
@@ -346,6 +500,7 @@ def main():
 
     print("-" * 60)
     print(f"Copied: {copied}")
+    print(f"  of which uncertain dates: {uncertain_dates}")
     print(f"Excluded by filter: {excluded}")
     print(f"Failed: {failed}")
     print(f"Missing (source no longer exists): {skipped_missing}")
