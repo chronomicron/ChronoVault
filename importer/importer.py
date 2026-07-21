@@ -465,8 +465,8 @@ def main():
             update_file_status(database_path, file_id, 'imported')
 
             record = {
-                'archive_path': dest,
-                'source_path': source,
+                'archive_path': str(dest),
+                'source_path': str(source),
                 'file_extension': file_extension,
                 'file_size': file_size,
                 'date_taken': date_taken.isoformat() if date_taken else None,

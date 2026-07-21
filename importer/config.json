@@ -9,7 +9,7 @@
     ],
     "min_file_size_bytes": 20480,
     "max_file_size_bytes": 524288000,
-    "require_exif": false,
+    "require_exif": true,
     "exclude_path_contains": [
         ".config",
         "cache"
