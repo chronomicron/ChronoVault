@@ -30,6 +30,44 @@ def load_config(config_file):
         sys.exit(1)
 
 
+def init_archive_database(archive_root):
+    """Initialize archive_database.db inside the archive folder, creating the table if needed."""
+    archive_dir = Path(archive_root)
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    archive_db_path = archive_dir / "archive_database.db"
+
+    conn = sqlite3.connect(archive_db_path)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS archive_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            archive_path TEXT UNIQUE NOT NULL,
+            source_path TEXT,
+            file_extension TEXT,
+            file_size INTEGER,
+            date_taken TEXT,
+            date_added TEXT
+        )
+    ''')
+    conn.commit()
+    return conn, archive_db_path
+
+
+def add_to_archive_database(conn, archive_path, source_path, file_extension, file_size, date_taken):
+    """Insert a record for a newly copied file into archive_database."""
+    cursor = conn.cursor()
+    date_added = datetime.now().isoformat()
+    date_taken_str = date_taken.isoformat() if date_taken else None
+
+    cursor.execute('''
+        INSERT OR IGNORE INTO archive_files
+        (archive_path, source_path, file_extension, file_size, date_taken, date_added)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (str(archive_path), str(source_path), file_extension, file_size, date_taken_str, date_added))
+    conn.commit()
+
+
 def get_photo_date(file_path):
     """Extract date from EXIF, then fall back to file system dates."""
     try:
@@ -137,7 +175,7 @@ def get_files_to_copy(db_path, extensions):
 
 
 def update_file_status(db_path, file_id, status):
-    """Update the status of a file in the database."""
+    """Update the status of a file in the located_files database."""
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     cursor.execute('UPDATE located_files SET status = ? WHERE id = ?', (status, file_id))
@@ -160,15 +198,19 @@ def main():
         print("Error: No extensions specified in configuration file.")
         sys.exit(1)
 
-    print(f"Database: {database_path}")
+    print(f"Located-files database: {database_path}")
     print(f"Archive root: {archive_root}")
     print(f"Extensions to copy: {extensions}")
+
+    archive_conn, archive_db_path = init_archive_database(archive_root)
+    print(f"Archive database: {archive_db_path}")
     print("-" * 60)
 
     files = get_files_to_copy(database_path, extensions)
 
     if not files:
         print("No files to copy. (Nothing with status 'located' matches your extensions.)")
+        archive_conn.close()
         return
 
     print(f"Found {len(files)} file(s) to copy.")
@@ -192,14 +234,18 @@ def main():
 
         photo_date = get_photo_date(file_path)
         dest = get_archive_path(file_path, archive_root, photo_date)
+        file_extension = source.suffix.lower()
 
         if copy_file_with_progress(source, dest, file_size):
             update_file_status(database_path, file_id, 'imported')
+            add_to_archive_database(archive_conn, dest, source, file_extension, file_size, photo_date)
             print(f"    OK -> {dest}")
             copied += 1
         else:
             print("    FAILED")
             failed += 1
+
+    archive_conn.close()
 
     print("-" * 60)
     print(f"Copied: {copied}")
