@@ -2,6 +2,7 @@ import json
 import sys
 import sqlite3
 from pathlib import Path
+from datetime import datetime
 
 
 def load_config(config_file):
@@ -11,12 +12,13 @@ def load_config(config_file):
             config = json.load(f)
         archive_root = config.get('archive_root')
         extensions = config.get('extensions', [])  # empty list = scan all files
+        output_path = config.get('output_path', 'audit_result.json')
 
         if not archive_root:
             print("Error: 'archive_root' must be specified in config.")
             sys.exit(1)
 
-        return archive_root, extensions
+        return archive_root, extensions, output_path
     except FileNotFoundError:
         print(f"Error: Configuration file '{config_file}' not found.")
         sys.exit(1)
@@ -57,7 +59,11 @@ def get_files_on_disk(archive_root, extensions):
 
 
 def get_files_in_database(archive_root):
-    """Return the set of archive_path values currently recorded in archive_database.db."""
+    """
+    Return two things from archive_database.db:
+    - a set of archive_path values (for fast set comparison)
+    - a dict of {archive_path: full row as a dict} (for detailed reporting)
+    """
     archive_db_path = Path(archive_root) / "archive_database.db"
 
     if not archive_db_path.exists():
@@ -65,12 +71,16 @@ def get_files_in_database(archive_root):
         sys.exit(1)
 
     conn = sqlite3.connect(archive_db_path)
+    conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("SELECT archive_path FROM archive_files")
+    cursor.execute("SELECT * FROM archive_files")
     rows = cursor.fetchall()
     conn.close()
 
-    return {row[0] for row in rows}
+    records_by_path = {row["archive_path"]: dict(row) for row in rows}
+    paths = set(records_by_path.keys())
+
+    return paths, records_by_path
 
 
 def main():
@@ -82,10 +92,11 @@ def main():
     config_file = sys.argv[1]
 
     print(f"Loading configuration from: {config_file}")
-    archive_root, extensions = load_config(config_file)
+    archive_root, extensions, output_path = load_config(config_file)
 
     print(f"Archive root: {archive_root}")
     print(f"Extensions filter: {extensions if extensions else '(all files)'}")
+    print(f"Output report: {output_path}")
     print("-" * 60)
 
     print("Scanning archive folder on disk...")
@@ -93,7 +104,7 @@ def main():
     print(f"Found {len(files_on_disk)} file(s) on disk.")
 
     print("Reading archive_database.db...")
-    files_in_database = get_files_in_database(archive_root)
+    files_in_database, records_by_path = get_files_in_database(archive_root)
     print(f"Found {len(files_in_database)} record(s) in database.")
     print("-" * 60)
 
@@ -132,6 +143,47 @@ def main():
         print("\nArchive and database are fully in sync.")
     else:
         print("\nDiscrepancies found. No changes have been made -- this is a report only.")
+
+    # Build the JSON report. Undocumented files get basic filesystem metadata,
+    # since there's no database record for them yet. Missing files get their
+    # full original database record, since that context is useful for deciding
+    # what to do about them later (e.g. was it a big video? when was it taken?).
+    undocumented_entries = []
+    for path in not_in_database:
+        file_path = Path(path)
+        try:
+            stat = file_path.stat()
+            undocumented_entries.append({
+                'path': path,
+                'file_size': stat.st_size,
+                'modified_date': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            })
+        except OSError:
+            undocumented_entries.append({'path': path, 'file_size': None, 'modified_date': None})
+
+    missing_entries = []
+    for path in missing_from_disk:
+        record = records_by_path.get(path, {})
+        missing_entries.append(record)
+
+    report = {
+        'audit_timestamp': datetime.now().isoformat(),
+        'archive_root': archive_root,
+        'summary': {
+            'on_disk': len(files_on_disk),
+            'in_database': len(files_in_database),
+            'undocumented_count': len(not_in_database),
+            'missing_count': len(missing_from_disk),
+            'in_sync': not not_in_database and not missing_from_disk,
+        },
+        'undocumented_files': undocumented_entries,
+        'missing_files': missing_entries,
+    }
+
+    with open(output_path, 'w') as f:
+        json.dump(report, f, indent=4)
+
+    print(f"\nReport written to: {output_path}")
 
 
 if __name__ == "__main__":
