@@ -17,11 +17,37 @@ def load_config(config_file):
         archive_root = config.get('archive_root')
         extensions = config.get('extensions_to_copy', [])
 
+        # Optional filters -- all have safe defaults so existing configs
+        # keep working exactly as before if these keys are absent.
+        min_file_size_bytes = config.get('min_file_size_bytes', 0)
+        max_file_size_bytes = config.get('max_file_size_bytes', None)  # None = no upper limit
+        require_exif = config.get('require_exif', False)
+        exclude_path_contains = config.get('exclude_path_contains', [])
+
+        # Thumbnail handling. Cameras (esp. Canon) create .THM sidecar thumbnail
+        # files alongside videos/photos -- these can be useful to keep as a trace
+        # of a deleted original, so they're excluded by default rather than
+        # silently dropped at indexing time.
+        exclude_thumbnails = config.get('exclude_thumbnails', True)
+        thumbnail_extensions = config.get('thumbnail_extensions', ['thm'])
+
         if not database_path or not archive_root:
             print("Error: 'database_path' and 'archive_root' must be specified in config.")
             sys.exit(1)
 
-        return database_path, archive_root, extensions
+        filters = {
+            'min_file_size_bytes': min_file_size_bytes,
+            'max_file_size_bytes': max_file_size_bytes,
+            'require_exif': require_exif,
+            'exclude_path_contains': exclude_path_contains,
+            'exclude_thumbnails': exclude_thumbnails,
+            'thumbnail_extensions': [
+                ext.lower() if ext.startswith('.') else '.' + ext.lower()
+                for ext in thumbnail_extensions
+            ],
+        }
+
+        return database_path, archive_root, extensions, filters
     except FileNotFoundError:
         print(f"Error: Configuration file '{config_file}' not found.")
         sys.exit(1)
@@ -68,21 +94,33 @@ def add_to_archive_database(conn, archive_path, source_path, file_extension, fil
     conn.commit()
 
 
-def get_photo_date(file_path):
-    """Extract date from EXIF, then fall back to file system dates."""
+def get_exif_data(file_path):
+    """Return the raw EXIF dict for a file, or None if unavailable/not an image."""
     try:
         image = Image.open(file_path)
-        exif_data = image._getexif()
-
-        if exif_data:
-            for tag_id, value in exif_data.items():
-                tag_name = TAGS.get(tag_id, tag_id)
-                if tag_name == "DateTimeOriginal" and value:
-                    return datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
-                if tag_name == "DateTimeDigitized" and value:
-                    return datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
+        return image._getexif()
     except Exception:
-        pass
+        return None
+
+
+def get_photo_date_from_exif(exif_data):
+    """Pull DateTimeOriginal or DateTimeDigitized out of an already-loaded EXIF dict."""
+    if not exif_data:
+        return None
+    for tag_id, value in exif_data.items():
+        tag_name = TAGS.get(tag_id, tag_id)
+        if tag_name == "DateTimeOriginal" and value:
+            return datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
+        if tag_name == "DateTimeDigitized" and value:
+            return datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
+    return None
+
+
+def get_photo_date(file_path, exif_data):
+    """Determine date: EXIF first, then fall back to file system creation date."""
+    exif_date = get_photo_date_from_exif(exif_data)
+    if exif_date:
+        return exif_date
 
     try:
         stat = Path(file_path).stat()
@@ -116,6 +154,40 @@ def format_size(num_bytes):
             return f"{size:.1f}{unit}"
         size /= 1024
     return f"{size:.1f}PB"
+
+
+def check_filters(file_path, file_size, exif_data, filters):
+    """
+    Check a file against the configured filters.
+    Returns (passes, reason) -- reason is a short string explaining
+    why the file was excluded, or None if it passes.
+    """
+    min_size = filters['min_file_size_bytes']
+    max_size = filters['max_file_size_bytes']
+    require_exif = filters['require_exif']
+    exclude_terms = filters['exclude_path_contains']
+
+    if min_size and file_size < min_size:
+        return False, f"below min size ({format_size(file_size)} < {format_size(min_size)})"
+
+    if max_size and file_size > max_size:
+        return False, f"above max size ({format_size(file_size)} > {format_size(max_size)})"
+
+    if exclude_terms:
+        path_str = str(file_path)
+        for term in exclude_terms:
+            if term in path_str:
+                return False, f"path contains excluded term '{term}'"
+
+    if filters['exclude_thumbnails']:
+        file_extension = Path(file_path).suffix.lower()
+        if file_extension in filters['thumbnail_extensions']:
+            return False, f"thumbnail file ({file_extension})"
+
+    if require_exif and not exif_data:
+        return False, "no EXIF data found"
+
+    return True, None
 
 
 def copy_file_with_progress(source, dest, file_size):
@@ -153,7 +225,13 @@ def copy_file_with_progress(source, dest, file_size):
 
 
 def get_files_to_copy(db_path, extensions):
-    """Retrieve files from database that match the extensions and have 'located' status."""
+    """
+    Retrieve files from database that match the extensions and are still eligible
+    to be processed. 'located' and 'excluded' are both eligible, since filters
+    (min/max size, require_exif, exclude_path_contains) can change between runs
+    and a previously-excluded file may pass on a later run. Only 'imported' files
+    are considered permanently done and are skipped.
+    """
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
@@ -165,7 +243,7 @@ def get_files_to_copy(db_path, extensions):
     placeholders = ','.join('?' * len(ext_list))
     query = f'''
         SELECT id, file_path FROM located_files
-        WHERE status = 'located' AND LOWER(file_extension) IN ({placeholders})
+        WHERE status IN ('located', 'excluded') AND LOWER(file_extension) IN ({placeholders})
     '''
     cursor.execute(query, ext_list)
     files = cursor.fetchall()
@@ -192,7 +270,7 @@ def main():
     config_file = sys.argv[1]
 
     print(f"Loading configuration from: {config_file}")
-    database_path, archive_root, extensions = load_config(config_file)
+    database_path, archive_root, extensions, filters = load_config(config_file)
 
     if not extensions:
         print("Error: No extensions specified in configuration file.")
@@ -201,6 +279,12 @@ def main():
     print(f"Located-files database: {database_path}")
     print(f"Archive root: {archive_root}")
     print(f"Extensions to copy: {extensions}")
+    print(f"Filters: min_size={filters['min_file_size_bytes']} bytes, "
+          f"max_size={filters['max_file_size_bytes']}, "
+          f"require_exif={filters['require_exif']}, "
+          f"exclude_path_contains={filters['exclude_path_contains']}, "
+          f"exclude_thumbnails={filters['exclude_thumbnails']} "
+          f"({filters['thumbnail_extensions']})")
 
     archive_conn, archive_db_path = init_archive_database(archive_root)
     print(f"Archive database: {archive_db_path}")
@@ -213,12 +297,13 @@ def main():
         archive_conn.close()
         return
 
-    print(f"Found {len(files)} file(s) to copy.")
+    print(f"Found {len(files)} file(s) to evaluate.")
     print("-" * 60)
 
     copied = 0
     failed = 0
     skipped_missing = 0
+    excluded = 0
 
     for idx, (file_id, file_path) in enumerate(files, 1):
         progress_label = f"[{idx}/{len(files)}]"
@@ -230,9 +315,21 @@ def main():
             continue
 
         file_size = source.stat().st_size
+
+        # Only attempt EXIF read if require_exif is on or we need it for dating anyway;
+        # cheap enough to just always try for image-like files.
+        exif_data = get_exif_data(source)
+
+        passes, reason = check_filters(source, file_size, exif_data, filters)
+        if not passes:
+            print(f"{progress_label} EXCLUDED: {file_path} ({reason})")
+            update_file_status(database_path, file_id, 'excluded')
+            excluded += 1
+            continue
+
         print(f"{progress_label} {file_path} ({format_size(file_size)})")
 
-        photo_date = get_photo_date(file_path)
+        photo_date = get_photo_date(source, exif_data)
         dest = get_archive_path(file_path, archive_root, photo_date)
         file_extension = source.suffix.lower()
 
@@ -249,9 +346,10 @@ def main():
 
     print("-" * 60)
     print(f"Copied: {copied}")
+    print(f"Excluded by filter: {excluded}")
     print(f"Failed: {failed}")
     print(f"Missing (source no longer exists): {skipped_missing}")
-    print(f"Total processed: {len(files)}")
+    print(f"Total evaluated: {len(files)}")
 
 
 if __name__ == "__main__":
