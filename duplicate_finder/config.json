@@ -1,0 +1,5 @@
+{
+    "database_path": "located_files.db",
+    "statuses_to_check": ["located"],
+    "output_path": "duplicate_report.json"
+}
