@@ -1,0 +1,46 @@
+{
+    "audit_timestamp": "2026-07-21T20:28:29.228428",
+    "archive_root": "archive",
+    "summary": {
+        "on_disk": 6,
+        "in_database": 6,
+        "undocumented_count": 1,
+        "missing_count": 1,
+        "misplaced_count": 0,
+        "undocumented_misplaced_count": 1,
+        "in_sync": false
+    },
+    "undocumented_files": [
+        {
+            "path": "archive/2026/07/20/Isabelle_Grou_langue_noir.jpg",
+            "file_size": 33051,
+            "modified_date": "2026-07-20T14:27:24.442931",
+            "date_source": "filesystem_fallback",
+            "correctly_placed": false,
+            "expected_folder": "2026/07/21",
+            "actual_folder": "2026/07/20"
+        }
+    ],
+    "missing_files": [
+        {
+            "id": 5,
+            "archive_path": "archive/2026/07/21/Orc_ranger.jpeg",
+            "source_path": "/home/omoikane/.local/share/Trash/files/archive/2026/07/17/Orc_ranger.jpeg",
+            "file_extension": ".jpeg",
+            "file_size": 128923,
+            "date_taken": "2026-07-21T15:05:24.717488",
+            "date_source": "filesystem_fallback",
+            "filesystem_creation_date": "2026-07-21T15:05:24.717488",
+            "date_uncertain": 1,
+            "date_added": "2026-07-21T19:20:57.163339",
+            "camera_make": null,
+            "camera_model": null,
+            "gps_latitude": null,
+            "gps_longitude": null,
+            "aperture": null,
+            "iso_speed": null,
+            "focal_length_mm": null
+        }
+    ],
+    "misplaced_files": []
+}

@@ -3,6 +3,82 @@ import sys
 import sqlite3
 from pathlib import Path
 from datetime import datetime
+from PIL import Image
+from PIL.ExifTags import TAGS
+
+
+def get_readable_exif(file_path):
+    """Return a {tag_name: value} dict of EXIF data for a file, or {} if unavailable."""
+    try:
+        image = Image.open(file_path)
+        exif_data = image._getexif()
+        if not exif_data:
+            return {}
+        return {TAGS.get(tag_id, tag_id): value for tag_id, value in exif_data.items()}
+    except Exception:
+        return {}
+
+
+def get_date_from_exif(readable_exif):
+    """Pull DateTimeOriginal or DateTimeDigitized from a readable EXIF dict, if present."""
+    for tag_name in ('DateTimeOriginal', 'DateTimeDigitized'):
+        value = readable_exif.get(tag_name)
+        if value:
+            try:
+                return datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
+            except ValueError:
+                continue
+    return None
+
+
+def get_filesystem_creation_date(file_path):
+    """File system creation date, used as a fallback when EXIF has no date."""
+    try:
+        stat = Path(file_path).stat()
+        return datetime.fromtimestamp(stat.st_ctime)
+    except Exception:
+        return None
+
+
+def get_expected_date(file_path, readable_exif):
+    """
+    Determine the date to use for checking a file's placement, same priority
+    Importer uses: EXIF first, file system creation date as a last resort.
+    Returns (date, source) where source is 'exif' or 'filesystem_fallback'.
+    """
+    exif_date = get_date_from_exif(readable_exif)
+    if exif_date:
+        return exif_date, 'exif'
+
+    fs_date = get_filesystem_creation_date(file_path)
+    if fs_date:
+        return fs_date, 'filesystem_fallback'
+
+    return None, None
+
+
+def get_expected_folder(date_value):
+    """Given a datetime, return the (year, month, day) folder components ChronoVault would use."""
+    if not date_value:
+        return None
+    return date_value.strftime("%Y"), date_value.strftime("%m"), date_value.strftime("%d")
+
+
+def get_actual_folder(file_path, archive_root):
+    """
+    Return the (year, month, day) folder components a file is actually sitting in,
+    based on its path relative to archive_root. Returns None if the file isn't
+    sitting three levels deep under archive_root (i.e. doesn't follow the expected
+    YYYY/MM/DD structure at all).
+    """
+    try:
+        relative = Path(file_path).relative_to(Path(archive_root))
+        parts = relative.parts
+        if len(parts) >= 4:  # year/month/day/filename at minimum
+            return parts[0], parts[1], parts[2]
+        return None
+    except ValueError:
+        return None
 
 
 def load_config(config_file):
@@ -114,6 +190,9 @@ def main():
     # In database, but the file no longer exists on disk
     missing_from_disk = sorted(files_in_database - files_on_disk)
 
+    # Present in both -- these are the ones we can check for correct placement
+    matched_files = sorted(files_on_disk & files_in_database)
+
     if not_in_database:
         print(f"Files on disk but NOT in database ({len(not_in_database)}):")
         for path in not_in_database:
@@ -132,39 +211,110 @@ def main():
         print("No missing files. Every database record has a matching file on disk. Good.")
         print()
 
+    # --- Check placement of matched files (on disk + in database) ---
+    print("Checking file placement against expected date-based folders...")
+    misplaced_files = []
+    for path in matched_files:
+        record = records_by_path.get(path, {})
+        date_taken_str = record.get('date_taken')
+
+        expected_folder = None
+        if date_taken_str:
+            try:
+                date_taken = datetime.fromisoformat(date_taken_str)
+                expected_folder = get_expected_folder(date_taken)
+            except ValueError:
+                expected_folder = None
+
+        actual_folder = get_actual_folder(path, archive_root)
+
+        if expected_folder and actual_folder and expected_folder != actual_folder:
+            expected_relative = "/".join(expected_folder) + "/" + Path(path).name
+            misplaced_files.append({
+                'archive_path': path,
+                'expected_relative_path': expected_relative,
+                'actual_folder': "/".join(actual_folder),
+                'expected_folder': "/".join(expected_folder),
+                'date_taken': date_taken_str,
+            })
+
+    # --- Check placement of undocumented files (on disk, not yet in database) ---
+    # These have no stored date_taken, so we read EXIF fresh, same as Importer would.
+    undocumented_entries = []
+    for path in not_in_database:
+        file_path = Path(path)
+        try:
+            stat = file_path.stat()
+            file_size = stat.st_size
+            modified_date = datetime.fromtimestamp(stat.st_mtime).isoformat()
+        except OSError:
+            file_size = None
+            modified_date = None
+
+        readable_exif = get_readable_exif(file_path)
+        expected_date, date_source = get_expected_date(file_path, readable_exif)
+        expected_folder = get_expected_folder(expected_date) if expected_date else None
+        actual_folder = get_actual_folder(path, archive_root)
+
+        entry = {
+            'path': path,
+            'file_size': file_size,
+            'modified_date': modified_date,
+            'date_source': date_source,
+        }
+
+        if expected_folder and actual_folder and expected_folder != actual_folder:
+            entry['correctly_placed'] = False
+            entry['expected_folder'] = "/".join(expected_folder)
+            entry['actual_folder'] = "/".join(actual_folder)
+        else:
+            entry['correctly_placed'] = True
+
+        undocumented_entries.append(entry)
+
+    if misplaced_files:
+        print(f"Files in the WRONG folder for their date ({len(misplaced_files)}):")
+        for item in misplaced_files:
+            print(f"  {item['archive_path']}")
+            print(f"    currently in: {item['actual_folder']}   expected: {item['expected_folder']}")
+        print()
+    else:
+        print("All matched files are sitting in the correct date-based folder. Good.")
+        print()
+
+    undocumented_misplaced = [e for e in undocumented_entries if not e['correctly_placed']]
+
+    if undocumented_misplaced:
+        print(f"Undocumented files ALSO in the wrong folder for their date ({len(undocumented_misplaced)}):")
+        for item in undocumented_misplaced:
+            print(f"  {item['path']}")
+            print(f"    currently in: {item['actual_folder']}   expected: {item['expected_folder']}"
+                  f"   (date source: {item['date_source']})")
+        print()
+    elif not_in_database:
+        print("Undocumented files are otherwise sitting in the correct date-based folder.")
+        print()
+
     print("-" * 60)
     print("Summary:")
     print(f"  On disk: {len(files_on_disk)}")
     print(f"  In database: {len(files_in_database)}")
     print(f"  On disk but undocumented: {len(not_in_database)}")
     print(f"  In database but missing from disk: {len(missing_from_disk)}")
+    print(f"  Matched files in wrong folder for their date: {len(misplaced_files)}")
+    print(f"  Undocumented files in wrong folder for their date: {len(undocumented_misplaced)}")
 
-    if not not_in_database and not missing_from_disk:
-        print("\nArchive and database are fully in sync.")
+    fully_in_sync = (
+        not not_in_database and not missing_from_disk
+        and not misplaced_files and not undocumented_misplaced
+    )
+
+    if fully_in_sync:
+        print("\nArchive and database are fully in sync and correctly organized.")
     else:
         print("\nDiscrepancies found. No changes have been made -- this is a report only.")
 
-    # Build the JSON report. Undocumented files get basic filesystem metadata,
-    # since there's no database record for them yet. Missing files get their
-    # full original database record, since that context is useful for deciding
-    # what to do about them later (e.g. was it a big video? when was it taken?).
-    undocumented_entries = []
-    for path in not_in_database:
-        file_path = Path(path)
-        try:
-            stat = file_path.stat()
-            undocumented_entries.append({
-                'path': path,
-                'file_size': stat.st_size,
-                'modified_date': datetime.fromtimestamp(stat.st_mtime).isoformat(),
-            })
-        except OSError:
-            undocumented_entries.append({'path': path, 'file_size': None, 'modified_date': None})
-
-    missing_entries = []
-    for path in missing_from_disk:
-        record = records_by_path.get(path, {})
-        missing_entries.append(record)
+    missing_entries = [records_by_path.get(path, {}) for path in missing_from_disk]
 
     report = {
         'audit_timestamp': datetime.now().isoformat(),
@@ -174,10 +324,13 @@ def main():
             'in_database': len(files_in_database),
             'undocumented_count': len(not_in_database),
             'missing_count': len(missing_from_disk),
-            'in_sync': not not_in_database and not missing_from_disk,
+            'misplaced_count': len(misplaced_files),
+            'undocumented_misplaced_count': len(undocumented_misplaced),
+            'in_sync': fully_in_sync,
         },
         'undocumented_files': undocumented_entries,
         'missing_files': missing_entries,
+        'misplaced_files': misplaced_files,
     }
 
     with open(output_path, 'w') as f:
