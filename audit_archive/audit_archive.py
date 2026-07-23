@@ -1,10 +1,88 @@
 import json
 import sys
 import sqlite3
+import hashlib
 from pathlib import Path
 from datetime import datetime
 from PIL import Image
 from PIL.ExifTags import TAGS
+
+
+def format_size(num_bytes):
+    """Convert a byte count into a human readable string."""
+    size = float(num_bytes)
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if size < 1024:
+            return f"{size:.1f}{unit}"
+        size /= 1024
+    return f"{size:.1f}PB"
+
+
+def compute_file_hash(file_path, file_size):
+    """Compute a SHA-256 hash of a file's contents, reading in chunks."""
+    chunk_size = 4 * 1024 * 1024  # 4 MB chunks
+    hasher = hashlib.sha256()
+    read_bytes = 0
+    show_progress = file_size >= 20 * 1024 * 1024
+
+    try:
+        with open(file_path, 'rb') as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+                read_bytes += len(chunk)
+                if show_progress:
+                    percent = (read_bytes / file_size) * 100
+                    print(f"\r    hashing: {format_size(read_bytes)} / {format_size(file_size)} ({percent:.1f}%)",
+                          end='', flush=True)
+        if show_progress:
+            print()
+        return hasher.hexdigest()
+    except Exception as e:
+        print(f"\n    Error hashing {file_path}: {e}")
+        return None
+
+
+def ensure_hash_column(archive_root):
+    """Add a file_hash column to archive_files if it doesn't already exist."""
+    archive_db_path = Path(archive_root) / "archive_database.db"
+    conn = sqlite3.connect(archive_db_path)
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(archive_files)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if 'file_hash' not in columns:
+        cursor.execute("ALTER TABLE archive_files ADD COLUMN file_hash TEXT")
+        conn.commit()
+    return conn
+
+
+def ensure_hashes_for_matched_files(conn, matched_files, records_by_path):
+    """
+    For every matched file (on disk + in database) that doesn't already have a
+    cached hash, compute one now and store it. This is metadata caching, not a
+    database "fix" -- no status or path fields are touched, only the hash.
+    Duplicate Finder can later read these cached hashes instead of re-hashing.
+    """
+    cursor = conn.cursor()
+    newly_hashed = 0
+
+    for path in matched_files:
+        record = records_by_path.get(path, {})
+        if record.get('file_hash'):
+            continue  # already cached
+
+        file_size = record.get('file_size') or Path(path).stat().st_size
+        print(f"  Hashing (for duplicate detection later): {path} ({format_size(file_size)})")
+        file_hash = compute_file_hash(path, file_size)
+        if file_hash:
+            cursor.execute("UPDATE archive_files SET file_hash = ? WHERE archive_path = ?", (file_hash, path))
+            record['file_hash'] = file_hash  # keep the in-memory dict in sync too
+            newly_hashed += 1
+
+    conn.commit()
+    return newly_hashed
 
 
 def get_readable_exif(file_path):
@@ -192,6 +270,13 @@ def main():
 
     # Present in both -- these are the ones we can check for correct placement
     matched_files = sorted(files_on_disk & files_in_database)
+
+    print("Ensuring hashes are cached for matched files (used later by Duplicate Finder)...")
+    hash_conn = ensure_hash_column(archive_root)
+    newly_hashed = ensure_hashes_for_matched_files(hash_conn, matched_files, records_by_path)
+    hash_conn.close()
+    print(f"  Newly hashed: {newly_hashed}, already cached: {len(matched_files) - newly_hashed}")
+    print("-" * 60)
 
     if not_in_database:
         print(f"Files on disk but NOT in database ({len(not_in_database)}):")
