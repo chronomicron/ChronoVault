@@ -15,6 +15,7 @@ read -p "Choose an option: " choice
 case $choice in
     1)
         read -p "Enter the top-level path to search: " search_path
+        search_path="${search_path/#\~/$HOME}"
         python3 indexer/indexer.py indexer/config.json "$search_path"
         ;;
     2)
