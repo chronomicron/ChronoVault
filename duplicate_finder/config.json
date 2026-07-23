@@ -1,5 +1,5 @@
 {
-    "database_path": "located_files.db",
-    "statuses_to_check": ["located"],
+    "mode": "archive",
+    "archive_root": "archive",
     "output_path": "duplicate_report.json"
 }
