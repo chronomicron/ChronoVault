@@ -7,10 +7,11 @@ from datetime import datetime
 from PIL import Image
 from PIL.ExifTags import TAGS, GPSTAGS
 
-# No digital camera existed before this date, so any "date taken" earlier
-# than this is treated as implausible. (Also happens to be the author's
-# birthday -- also predates digital cameras. Small tribute, not a bug.)
-EARLIEST_PLAUSIBLE_DATE = datetime(1972, 7, 26)
+# Make the project root importable regardless of the current working
+# directory, so "from analyze_date.analyze_date import analyze_date" works
+# whether ChronoVault is run via ./chronovault.sh or called directly.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from analyze_date.analyze_date import analyze_date
 
 
 def load_config(config_file):
@@ -31,7 +32,7 @@ def load_config(config_file):
         thumbnail_extensions = config.get('thumbnail_extensions', ['thm'])
 
         # How many days of disagreement between EXIF date and filesystem
-        # creation date before we flag the file as date_uncertain.
+        # creation date before analyze_date flags the file as date_uncertain.
         date_mismatch_threshold_days = config.get('date_mismatch_threshold_days', 1)
 
         if not database_path or not archive_root:
@@ -193,67 +194,6 @@ def get_camera_info(readable_exif):
     )
 
 
-def get_photo_date_from_exif(readable_exif):
-    """Pull DateTimeOriginal or DateTimeDigitized out of a readable EXIF dict."""
-    for tag_name in ('DateTimeOriginal', 'DateTimeDigitized'):
-        value = readable_exif.get(tag_name)
-        if value:
-            try:
-                return datetime.strptime(value, "%Y:%m:%d %H:%M:%S"), tag_name
-            except ValueError:
-                continue
-    return None, None
-
-
-def get_filesystem_creation_date(file_path):
-    """File system creation date, used as a fallback and for cross-checking EXIF."""
-    try:
-        stat = Path(file_path).stat()
-        return datetime.fromtimestamp(stat.st_ctime)
-    except Exception:
-        return None
-
-
-def determine_date_info(file_path, readable_exif, mismatch_threshold_days):
-    """
-    Work out the date to use for archiving a file, where that date came from,
-    and whether it should be flagged as uncertain.
-
-    Returns a dict with: date_taken, date_source, filesystem_creation_date, date_uncertain
-    """
-    exif_date, exif_tag = get_photo_date_from_exif(readable_exif)
-    fs_date = get_filesystem_creation_date(file_path)
-
-    date_uncertain = False
-
-    if exif_date:
-        date_taken = exif_date
-        date_source = 'exif_original' if exif_tag == 'DateTimeOriginal' else 'exif_digitized'
-
-        # Trigger 3: EXIF date and filesystem date disagree by more than the threshold.
-        if fs_date:
-            delta_days = abs((exif_date - fs_date).days)
-            if delta_days > mismatch_threshold_days:
-                date_uncertain = True
-    else:
-        # Trigger 1: no EXIF date at all -- falling back to filesystem date.
-        date_taken = fs_date
-        date_source = 'filesystem_fallback'
-        date_uncertain = True
-
-    # Trigger 2: implausible date -- before digital cameras existed, or in the future.
-    if date_taken:
-        if date_taken < EARLIEST_PLAUSIBLE_DATE or date_taken > datetime.now():
-            date_uncertain = True
-
-    return {
-        'date_taken': date_taken,
-        'date_source': date_source,
-        'filesystem_creation_date': fs_date,
-        'date_uncertain': date_uncertain,
-    }
-
-
 def get_archive_path(file_path, archive_root, date_taken):
     """Determine the archive destination path based on the resolved date."""
     if not date_taken:
@@ -387,8 +327,8 @@ def update_file_status(db_path, file_id, status):
 
 def main():
     if len(sys.argv) != 2:
-        print("Usage: python importer.py <config.json>")
-        print("Example: python importer.py importer/config.json")
+        print("Usage: python3 importer.py <config.json>")
+        print("Example: python3 importer.py importer/config.json")
         sys.exit(1)
 
     config_file = sys.argv[1]
@@ -453,7 +393,14 @@ def main():
 
         print(f"{progress_label} {file_path} ({format_size(file_size)})")
 
-        date_info = determine_date_info(source, readable_exif, filters['date_mismatch_threshold_days'])
+        # Hand the evidence we have off to the date analyzer and get back
+        # its conclusion -- Importer doesn't need to know how it figured
+        # this out, only what to do with the answer.
+        date_info = analyze_date({
+            'file_path': source,
+            'readable_exif': readable_exif,
+            'mismatch_threshold_days': filters['date_mismatch_threshold_days'],
+        })
         date_taken = date_info['date_taken']
         dest = get_archive_path(file_path, archive_root, date_taken)
         file_extension = source.suffix.lower()
