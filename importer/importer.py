@@ -31,9 +31,14 @@ def load_config(config_file):
         exclude_thumbnails = config.get('exclude_thumbnails', True)
         thumbnail_extensions = config.get('thumbnail_extensions', ['thm'])
 
-        # How many days of disagreement between EXIF date and filesystem
-        # creation date before analyze_date flags the file as date_uncertain.
+        # How many days of disagreement between date signals (e.g. EXIF vs.
+        # filesystem) before analyze_date treats them as disagreeing.
         date_mismatch_threshold_days = config.get('date_mismatch_threshold_days', 1)
+
+        # Files analyze_date isn't confident about (date_uncertain=True) get
+        # routed here instead of a guessed YYYY/MM/DD folder, so they can be
+        # reviewed and placed manually later rather than silently misfiled.
+        review_folder_name = config.get('review_folder_name', '_review_needed')
 
         if not database_path or not archive_root:
             print("Error: 'database_path' and 'archive_root' must be specified in config.")
@@ -50,6 +55,7 @@ def load_config(config_file):
                 for ext in thumbnail_extensions
             ],
             'date_mismatch_threshold_days': date_mismatch_threshold_days,
+            'review_folder_name': review_folder_name,
         }
 
         return database_path, archive_root, extensions, filters
@@ -61,8 +67,18 @@ def load_config(config_file):
         sys.exit(1)
 
 
+def ensure_column(conn, table, column, column_type):
+    """Add a column to a table if it doesn't already exist (safe schema migration)."""
+    cursor = conn.cursor()
+    cursor.execute(f"PRAGMA table_info({table})")
+    existing_columns = {row[1] for row in cursor.fetchall()}
+    if column not in existing_columns:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+        conn.commit()
+
+
 def init_archive_database(archive_root):
-    """Initialize archive_database.db inside the archive folder, creating the table if needed."""
+    """Initialize archive_database.db inside the archive folder, creating/updating the table as needed."""
     archive_dir = Path(archive_root)
     archive_dir.mkdir(parents=True, exist_ok=True)
 
@@ -92,6 +108,12 @@ def init_archive_database(archive_root):
         )
     ''')
     conn.commit()
+
+    # Added after the table above may already exist from earlier runs --
+    # migrate older databases forward rather than requiring a fresh start.
+    ensure_column(conn, 'archive_files', 'confidence', 'INTEGER')
+    ensure_column(conn, 'archive_files', 'date_reason', 'TEXT')
+
     return conn, archive_db_path
 
 
@@ -103,14 +125,15 @@ def add_to_archive_database(conn, record):
         (archive_path, source_path, file_extension, file_size,
          date_taken, date_source, filesystem_creation_date, date_uncertain, date_added,
          camera_make, camera_model, gps_latitude, gps_longitude,
-         aperture, iso_speed, focal_length_mm)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         aperture, iso_speed, focal_length_mm, confidence, date_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         record['archive_path'], record['source_path'], record['file_extension'], record['file_size'],
         record['date_taken'], record['date_source'], record['filesystem_creation_date'],
         record['date_uncertain'], record['date_added'],
         record['camera_make'], record['camera_model'], record['gps_latitude'], record['gps_longitude'],
-        record['aperture'], record['iso_speed'], record['focal_length_mm']
+        record['aperture'], record['iso_speed'], record['focal_length_mm'],
+        record['confidence'], record['date_reason']
     ))
     conn.commit()
 
@@ -194,21 +217,50 @@ def get_camera_info(readable_exif):
     )
 
 
-def get_archive_path(file_path, archive_root, date_taken):
-    """Determine the archive destination path based on the resolved date."""
-    if not date_taken:
-        print(f"Warning: Could not determine any date for {file_path}, using current date")
-        date_taken = datetime.now()
+def get_archive_path(file_path, archive_root, date_taken, date_uncertain, review_folder_name):
+    """
+    Determine the archive destination folder.
 
-    year = date_taken.strftime("%Y")
-    month = date_taken.strftime("%m")
-    day = date_taken.strftime("%d")
+    Confident dates go into the usual YYYY/MM/DD structure. Files
+    analyze_date wasn't confident about go into a flat review folder
+    instead of a guessed (and possibly wrong) date folder, so they can be
+    reviewed and placed manually later.
+    """
+    if date_uncertain:
+        archive_dir = Path(archive_root) / review_folder_name
+    else:
+        if not date_taken:
+            print(f"Warning: Could not determine any date for {file_path}, using current date")
+            date_taken = datetime.now()
+        year = date_taken.strftime("%Y")
+        month = date_taken.strftime("%m")
+        day = date_taken.strftime("%d")
+        archive_dir = Path(archive_root) / year / month / day
 
-    archive_dir = Path(archive_root) / year / month / day
     archive_dir.mkdir(parents=True, exist_ok=True)
 
     filename = Path(file_path).name
     return archive_dir / filename
+
+
+def get_unique_destination(dest):
+    """
+    If dest already exists (name collision), append ' (1)', ' (2)', etc.
+    until a free name is found. Most relevant in the flat review folder,
+    where filename collisions are far more likely than in date folders.
+    """
+    if not dest.exists():
+        return dest
+
+    stem = dest.stem
+    suffix = dest.suffix
+    parent = dest.parent
+    counter = 1
+    while True:
+        candidate = parent / f"{stem} ({counter}){suffix}"
+        if not candidate.exists():
+            return candidate
+        counter += 1
 
 
 def format_size(num_bytes):
@@ -350,6 +402,7 @@ def main():
           f"exclude_thumbnails={filters['exclude_thumbnails']} "
           f"({filters['thumbnail_extensions']}), "
           f"date_mismatch_threshold_days={filters['date_mismatch_threshold_days']}")
+    print(f"Low-confidence files will be routed to: {archive_root}/{filters['review_folder_name']}/")
 
     archive_conn, archive_db_path = init_archive_database(archive_root)
     print(f"Archive database: {archive_db_path}")
@@ -369,7 +422,7 @@ def main():
     failed = 0
     skipped_missing = 0
     excluded = 0
-    uncertain_dates = 0
+    sent_to_review = 0
 
     for idx, (file_id, file_path) in enumerate(files, 1):
         progress_label = f"[{idx}/{len(files)}]"
@@ -402,7 +455,12 @@ def main():
             'mismatch_threshold_days': filters['date_mismatch_threshold_days'],
         })
         date_taken = date_info['date_taken']
-        dest = get_archive_path(file_path, archive_root, date_taken)
+
+        dest = get_archive_path(
+            file_path, archive_root, date_taken,
+            date_info['date_uncertain'], filters['review_folder_name']
+        )
+        dest = get_unique_destination(dest)
         file_extension = source.suffix.lower()
 
         camera_make, camera_model, aperture, iso_speed, focal_length = get_camera_info(readable_exif)
@@ -431,14 +489,17 @@ def main():
                 'aperture': aperture,
                 'iso_speed': iso_speed,
                 'focal_length_mm': focal_length,
+                'confidence': date_info['confidence'],
+                'date_reason': date_info['reason'],
             }
             add_to_archive_database(archive_conn, record)
 
-            uncertain_tag = " [UNCERTAIN DATE]" if date_info['date_uncertain'] else ""
-            print(f"    OK -> {dest}{uncertain_tag}")
-            copied += 1
             if date_info['date_uncertain']:
-                uncertain_dates += 1
+                print(f"    REVIEW -> {dest}  (confidence={date_info['confidence']}: {date_info['reason']})")
+                sent_to_review += 1
+            else:
+                print(f"    OK -> {dest}  (confidence={date_info['confidence']}: {date_info['reason']})")
+            copied += 1
         else:
             print("    FAILED")
             failed += 1
@@ -447,7 +508,7 @@ def main():
 
     print("-" * 60)
     print(f"Copied: {copied}")
-    print(f"  of which uncertain dates: {uncertain_dates}")
+    print(f"  of which sent to review folder (low confidence): {sent_to_review}")
     print(f"Excluded by filter: {excluded}")
     print(f"Failed: {failed}")
     print(f"Missing (source no longer exists): {skipped_missing}")
