@@ -7,9 +7,9 @@
         "mp4",
         "mov"
     ],
-    "min_file_size_bytes": 20480,
+    "min_file_size_bytes": 0,
     "max_file_size_bytes": 524288000,
-    "require_exif": true,
+    "require_exif": false,
     "exclude_path_contains": [
         ".config",
         "cache"
