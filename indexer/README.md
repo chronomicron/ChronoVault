@@ -19,7 +19,7 @@ Each entry starts with a status of `located`. Later stages of the pipeline (like
 Run Indexer from the terminal, from the `ChronoVault/` project root:
 
 ```
-python indexer/indexer.py indexer/config.json /path/to/search
+python3 indexer/indexer.py indexer/config.json /path/to/search
 ```
 
 **Arguments:**
@@ -30,7 +30,7 @@ python indexer/indexer.py indexer/config.json /path/to/search
 **Example:**
 
 ```
-python indexer/indexer.py indexer/config.json ~/Pictures
+python3 indexer/indexer.py indexer/config.json ~/Pictures
 ```
 
 This searches everything under `~/Pictures`, recursively, and logs any matching files into the database specified in `config.json`.
@@ -38,8 +38,8 @@ This searches everything under `~/Pictures`, recursively, and logs any matching 
 You can run Indexer again with a different path to add more locations to the same inventory:
 
 ```
-python indexer/indexer.py indexer/config.json /media/usb-drive
-python indexer/indexer.py indexer/config.json /mnt/nas/old-backups
+python3 indexer/indexer.py indexer/config.json /media/usb-drive
+python3 indexer/indexer.py indexer/config.json /mnt/nas/old-backups
 ```
 
 Each run adds newly found files to the same database, skipping anything already logged.
@@ -62,8 +62,10 @@ Each run adds newly found files to the same database, skipping anything already 
 }
 ```
 
-- **`database_path`** — where the database lives. Paths are resolved relative to the directory you run the command *from*, not relative to `config.json`'s location. Since the convention is to always run commands from the `ChronoVault/` root, a plain filename like `"located_files.db"` will land at the project root.
-- **`extensions`** — the list of file extensions Indexer should look for. Not case-sensitive, and the leading dot is optional (`"jpg"` and `".jpg"` are both fine).
+| Key             | Required | Default | Description |
+|------------------|----------|---------|--------------|
+| `database_path`  | Yes      | —       | Where the database lives. Paths are resolved relative to the directory you run the command *from*, not relative to `config.json`'s location. Since the convention is to always run commands from the `ChronoVault/` root, a plain filename like `"located_files.db"` will land at the project root. |
+| `extensions`     | Yes      | —       | The list of file extensions Indexer should look for. Not case-sensitive, and the leading dot is optional (`"jpg"` and `".jpg"` are both fine). |
 
 Edit this file to change what file types are indexed, or to point Indexer at a different database — no code changes required.
 
@@ -80,8 +82,9 @@ Indexer creates and maintains a table called `located_files`:
 | `creation_date`     | TEXT    | File system creation timestamp                     |
 | `modification_date` | TEXT    | File system last-modified timestamp                |
 | `status`            | TEXT    | Pipeline status — starts as `located`               |
+| `file_hash`         | TEXT    | SHA-256 hash of the file's contents. Not set by Indexer — this column is added later, automatically, the first time Duplicate Finder runs in `source` mode against this database. `NULL` until then. |
 
-The database is created automatically the first time Indexer runs, if it doesn't already exist.
+The database is created automatically the first time Indexer runs, if it doesn't already exist. See `Database_schema.md` at the project root for the complete cross-tool schema reference.
 
 ## Notes
 
