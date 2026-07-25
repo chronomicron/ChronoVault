@@ -6,8 +6,10 @@
 # --- ChronoVault: the archive itself (actual photos/videos, not source-controlled) ---
 archive/
 test_data/
+
 audit_result.json
 duplicate_report.json
+
 
 # --- Python ---
 __pycache__/
