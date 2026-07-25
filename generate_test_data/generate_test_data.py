@@ -46,6 +46,7 @@ git -- add it to .gitignore (e.g. "test_data/").
 
 import argparse
 import random
+import struct
 import sys
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -125,6 +126,97 @@ def pick_camera():
     return random.choice(CAMERAS)
 
 
+def build_exif_bytes(date_str=None, make=None, model=None):
+    """
+    Hand-build a minimal raw EXIF (TIFF) blob byte-by-byte with struct,
+    rather than using Pillow's higher-level Image.Exif()/get_ifd() class.
+
+    That higher-level API's sub-IFD offset handling has behaved
+    inconsistently across Pillow versions in practice -- files can save
+    without error but come back with no readable EXIF at all. Building
+    the bytes directly avoids depending on that machinery; the only thing
+    relied on here is JPEG save(..., exif=<raw bytes>), which is old and
+    stable, plus the standard TIFF/EXIF byte layout, which isn't going to
+    change.
+
+    Layout: "Exif\\x00\\x00" marker + little-endian TIFF header + IFD0
+    (Make/Model, plus a pointer to the Exif sub-IFD if there's a date) +
+    Exif sub-IFD (DateTimeOriginal).
+    """
+    def ascii_field(text):
+        return text.encode('ascii') + b'\x00'
+
+    ifd0_fields = []
+    if make:
+        ifd0_fields.append((271, ascii_field(make)))   # Make
+    if model:
+        ifd0_fields.append((272, ascii_field(model)))  # Model
+
+    exif_fields = []
+    if date_str:
+        exif_fields.append((36867, ascii_field(date_str)))  # DateTimeOriginal
+
+    # +1 entry in IFD0 for the ExifOffset pointer, only if we actually have
+    # an Exif sub-IFD to point to.
+    n0 = len(ifd0_fields) + (1 if exif_fields else 0)
+    ifd0_size = 2 + 12 * n0 + 4
+    ifd0_offset = 8  # right after the 8-byte TIFF header
+    cursor = ifd0_offset + ifd0_size
+
+    ifd0_extra = bytearray()
+    ifd0_entries = []
+    for tag, val in ifd0_fields:
+        count = len(val)
+        if count <= 4:
+            value_field = val + b'\x00' * (4 - count)
+        else:
+            value_field = struct.pack('<I', cursor)
+            ifd0_extra += val
+            cursor += count
+        ifd0_entries.append((tag, 2, count, value_field))  # type 2 = ASCII
+
+    exif_ifd_offset = cursor
+    exif_ifd_size = 2 + 12 * len(exif_fields) + 4
+    cursor2 = exif_ifd_offset + exif_ifd_size
+
+    exif_extra = bytearray()
+    exif_entries = []
+    for tag, val in exif_fields:
+        count = len(val)
+        if count <= 4:
+            value_field = val + b'\x00' * (4 - count)
+        else:
+            value_field = struct.pack('<I', cursor2)
+            exif_extra += val
+            cursor2 += count
+        exif_entries.append((tag, 2, count, value_field))
+
+    if exif_fields:
+        ifd0_entries.append((0x8769, 4, 1, struct.pack('<I', exif_ifd_offset)))  # ExifOffset, type 4 = LONG
+
+    ifd0_entries.sort(key=lambda e: e[0])   # TIFF requires tags sorted ascending within an IFD
+    exif_entries.sort(key=lambda e: e[0])
+
+    out = bytearray()
+    out += b'Exif\x00\x00'
+    out += b'II' + struct.pack('<H', 42) + struct.pack('<I', ifd0_offset)
+
+    out += struct.pack('<H', len(ifd0_entries))
+    for tag, typ, count, value_field in ifd0_entries:
+        out += struct.pack('<HHI', tag, typ, count) + value_field
+    out += struct.pack('<I', 0)  # no next IFD
+    out += ifd0_extra
+
+    if exif_fields:
+        out += struct.pack('<H', len(exif_entries))
+        for tag, typ, count, value_field in exif_entries:
+            out += struct.pack('<HHI', tag, typ, count) + value_field
+        out += struct.pack('<I', 0)
+        out += exif_extra
+
+    return bytes(out)
+
+
 def make_image(path, exif_date=None):
     """
     Create a tiny JPEG at `path`. If exif_date is given, write it as
@@ -138,15 +230,13 @@ def make_image(path, exif_date=None):
         img.save(path, "jpeg")
         return
 
-    exif = Image.Exif()
     make, model = pick_camera()
-    if make:
-        exif[271] = make    # Make (0th IFD)
-        exif[272] = model   # Model (0th IFD)
-    exif_subifd = exif.get_ifd(0x8769)  # Exif SubIFD, where DateTimeOriginal lives
-    exif_subifd[36867] = exif_date.strftime("%Y:%m:%d %H:%M:%S")
-
-    img.save(path, "jpeg", exif=exif.tobytes())
+    exif_bytes = build_exif_bytes(
+        date_str=exif_date.strftime("%Y:%m:%d %H:%M:%S"),
+        make=make,
+        model=model,
+    )
+    img.save(path, "jpeg", exif=exif_bytes)
 
 
 def make_junk_video(path):
