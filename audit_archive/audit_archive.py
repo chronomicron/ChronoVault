@@ -239,8 +239,8 @@ def get_files_in_database(archive_root):
 
 def main():
     if len(sys.argv) != 2:
-        print("Usage: python audit_archive.py <config.json>")
-        print("Example: python audit_archive.py audit_archive/config.json")
+        print("Usage: python3 audit_archive.py <config.json>")
+        print("Example: python3 audit_archive.py audit_archive/config.json")
         sys.exit(1)
 
     config_file = sys.argv[1]
@@ -301,13 +301,19 @@ def main():
     misplaced_files = []
     for path in matched_files:
         record = records_by_path.get(path, {})
-        date_taken_str = record.get('date_taken')
+        # A person's manual correction (via write_data.apply_date_correction)
+        # is authoritative if one exists -- that's a deliberate decision about
+        # where the file belongs, and should win over the original algorithmic
+        # guess in date_taken, which is preserved unchanged specifically as a
+        # historical record, not as the current "correct" answer.
+        user_corrected_str = record.get('user_corrected_date')
+        effective_date_str = user_corrected_str or record.get('date_taken')
 
         expected_folder = None
-        if date_taken_str:
+        if effective_date_str:
             try:
-                date_taken = datetime.fromisoformat(date_taken_str)
-                expected_folder = get_expected_folder(date_taken)
+                effective_date = datetime.fromisoformat(effective_date_str)
+                expected_folder = get_expected_folder(effective_date)
             except ValueError:
                 expected_folder = None
 
@@ -320,7 +326,8 @@ def main():
                 'expected_relative_path': expected_relative,
                 'actual_folder': "/".join(actual_folder),
                 'expected_folder': "/".join(expected_folder),
-                'date_taken': date_taken_str,
+                'date_taken': effective_date_str,
+                'date_source': 'user_corrected' if user_corrected_str else 'original',
             })
 
     # --- Check placement of undocumented files (on disk, not yet in database) ---
@@ -360,7 +367,8 @@ def main():
     if misplaced_files:
         print(f"Files in the WRONG folder for their date ({len(misplaced_files)}):")
         for item in misplaced_files:
-            print(f"  {item['archive_path']}")
+            source_tag = "  (checked against user-corrected date)" if item['date_source'] == 'user_corrected' else ""
+            print(f"  {item['archive_path']}{source_tag}")
             print(f"    currently in: {item['actual_folder']}   expected: {item['expected_folder']}")
         print()
     else:
