@@ -68,6 +68,14 @@ def apply_date_correction(archive_root, file_id, corrected_date):
     out of the review folder into the normal YYYY/MM/DD folder that date
     implies.
 
+    Only permitted for files currently marked uncertain (date_uncertain=1).
+    A file the algorithm was already confident about (solid EXIF, dates
+    agreeing) is deliberately left alone here -- when the computer's date
+    signals already agree with each other, they're more likely to be
+    right than a manual correction is to be a deliberate fix rather than
+    a mistake. Files with no reliable evidence at all are exactly the
+    case a manual correction is meant for.
+
     'corrected_date' should be a datetime (or date) object -- parsing
     whatever raw input a UI collected (a date picker's value, a form
     field) into that shape is the caller's responsibility, same as
@@ -93,6 +101,16 @@ def apply_date_correction(archive_root, file_id, corrected_date):
     if row is None:
         conn.close()
         return {'success': False, 'new_archive_path': None, 'error': f"No file with id {file_id}."}
+
+    already_user_corrected = row['user_corrected_date'] is not None
+    if row['date_uncertain'] != 1 and not already_user_corrected:
+        conn.close()
+        return {'success': False, 'new_archive_path': None,
+                'error': f"File id {file_id} is not marked uncertain (date_uncertain={row['date_uncertain']}) "
+                         f"and has never been manually corrected. Corrections are only permitted for files "
+                         f"still in the review bucket -- a file the algorithm was already confident about "
+                         f"shouldn't be overridden this way. (A file you've already corrected once can still "
+                         f"be corrected again, if you need to fix your own earlier correction.)"}
 
     current_path = Path(row['archive_path'])
     if not current_path.exists():
