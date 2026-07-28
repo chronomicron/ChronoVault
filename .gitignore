@@ -20,6 +20,12 @@ __pycache__/
 venv/
 env/
 
+# -- images ---
+*.jpg
+*.jpeg
+*.png
+*.webp
+
 # --- Editor / OS clutter ---
 .vscode/
 .DS_Store
