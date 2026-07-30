@@ -38,27 +38,40 @@ from PIL import Image
 import pytesseract
 
 # How much of the image's width/height each corner crop covers. Date
-# stamps are almost always small and close to an edge -- cropping tight
-# both speeds up OCR and avoids picking up unrelated text/noise from the
-# rest of the photo.
-CORNER_FRACTION = 0.25
+# stamps are usually small and close to an edge, but real-world testing
+# showed 25% width was too tight and truncated a longer stamp (a date +
+# time together ran wider than that). Widened accordingly -- still small
+# enough to avoid picking up unrelated content from the rest of the photo.
+CORNER_FRACTION = 0.40
 
 # Corners are upscaled before OCR -- tesseract is generally much more
 # reliable on larger text than on the small, low-contrast stamps typical
 # of date-stamp cameras.
 UPSCALE_FACTOR = 3
 
+# Rotations tried per corner, in order. 0 first, since most date stamps
+# are printed right-side-up and most photos are landscape -- checking the
+# native orientation first keeps the common case fast (an early match
+# skips the rest entirely). The other three only get tried if 0 degrees
+# doesn't produce a valid date -- this is what catches a stamp printed
+# sideways along a photo's edge.
+ROTATIONS_TO_TRY = [0, 90, 180, 270]
+
 # Date patterns commonly burned in by consumer date-stamp cameras from
 # the film and early-digital era, roughly in order of how common they are.
 # All patterns are matched against the raw OCR text for each corner.
 DATE_PATTERNS = [
-    # '99 07 15  or  1999-07-15  or  1999:07:15  (year month day -- least ambiguous, checked first)
-    (r"'?(\d{4}|\d{2})[\s\-\./:](\d{1,2})[\s\-\./:](\d{1,2})\b", "ymd"),
-    # 07/15/1999  or  07-15-99                   (month day year -- common US date-stamp format)
-    (r"\b(\d{1,2})[\s\-\./:](\d{1,2})[\s\-\./:]'?(\d{4}|\d{2})\b", "mdy"),
-    # 15 07 '99  or  15.07.1999                  (day month year -- common international format)
-    (r"\b(\d{1,2})[\s\-\./:](\d{1,2})[\s\-\./:]'?(\d{4}|\d{2})\b", "dmy"),
+    # '99 07 15  or  1999-07-15                 (year month day -- least ambiguous, checked first)
+    (r"'?(\d{4}|\d{2})[\s\-\./](\d{1,2})[\s\-\./](\d{1,2})\b", "ymd"),
+    # 07/15/1999  or  07-15-99                  (month day year -- common US date-stamp format)
+    (r"\b(\d{1,2})[\s\-\./](\d{1,2})[\s\-\./]'?(\d{4}|\d{2})\b", "mdy"),
+    # 15 07 '99  or  15.07.1999                 (day month year -- common international format)
+    (r"\b(\d{1,2})[\s\-\./](\d{1,2})[\s\-\./]'?(\d{4}|\d{2})\b", "dmy"),
 ]
+# Deliberately NOT including ':' as a separator -- real-world testing showed
+# a colon in a date stamp means it's actually the clock time, not the date
+# (e.g. "10:02"). Parsing a time as if it were a date risks a confident
+# false match, which is worse than finding nothing.
 
 # Constrains Tesseract's output to just digits, the punctuation a date
 # stamp could plausibly contain, and spaces -- cuts down on garbage/noise
@@ -107,18 +120,21 @@ def find_date_in_corners(file_path, debug_dir=None):
     """
     Look for an OCR-readable date stamp in each of the four corners of an
     image. Checks bottom_right first (the most common date-stamp
-    location), then the others.
+    location), then the others. Within each corner, tries every rotation
+    in ROTATIONS_TO_TRY (0 degrees first) -- this is what catches a stamp
+    printed sideways along a photo's edge, without needing to know in
+    advance which way it's rotated.
 
-    If debug_dir is given, saves the actual (upscaled) crop fed to OCR
-    for every corner checked, as PNG files named
-    '<original filename>_<corner>.png' -- the single most useful thing
-    to look at when OCR is reading pure garbage: is the crop region even
-    landing on the stamp at all, or is CORNER_FRACTION cropping the
-    wrong area entirely?
+    If debug_dir is given, saves the actual (upscaled, rotated) crop fed
+    to OCR for every corner/rotation combination actually tried, as PNG
+    files named '<original filename>_<corner>_rot<degrees>.png' -- the
+    single most useful thing to look at when OCR is reading pure garbage:
+    is the crop region even landing on the stamp at all, or is
+    CORNER_FRACTION cropping the wrong area entirely?
 
     Returns a dict:
-        {'date': datetime or None, 'corner': str or None, 'raw_text': str or None,
-         'checked': [{'corner': str, 'raw_text': str}, ...]}
+        {'date': datetime or None, 'corner': str or None, 'rotation': int or None,
+         'raw_text': str or None, 'checked': [{'corner': str, 'rotation': int, 'raw_text': str}, ...]}
     """
     image = Image.open(file_path).convert("L")  # grayscale -- helps OCR on colored stamp digits
     corners = _get_corner_crops(image)
@@ -137,15 +153,19 @@ def find_date_in_corners(file_path, debug_dir=None):
             Image.LANCZOS
         )
 
-        if debug_dir:
-            stem = Path(file_path).stem
-            upscaled.save(Path(debug_dir) / f"{stem}_{corner_name}.png")
+        for rotation in ROTATIONS_TO_TRY:
+            rotated = upscaled.rotate(rotation, expand=True) if rotation else upscaled
 
-        raw_text = pytesseract.image_to_string(upscaled, config=TESSERACT_CONFIG).strip()
-        checked.append({"corner": corner_name, "raw_text": raw_text})
+            if debug_dir:
+                stem = Path(file_path).stem
+                rotated.save(Path(debug_dir) / f"{stem}_{corner_name}_rot{rotation}.png")
 
-        date = _parse_date_candidate(raw_text)
-        if date:
-            return {"date": date, "corner": corner_name, "raw_text": raw_text, "checked": checked}
+            raw_text = pytesseract.image_to_string(rotated, config=TESSERACT_CONFIG).strip()
+            checked.append({"corner": corner_name, "rotation": rotation, "raw_text": raw_text})
 
-    return {"date": None, "corner": None, "raw_text": None, "checked": checked}
+            date = _parse_date_candidate(raw_text)
+            if date:
+                return {"date": date, "corner": corner_name, "rotation": rotation,
+                         "raw_text": raw_text, "checked": checked}
+
+    return {"date": None, "corner": None, "rotation": None, "raw_text": None, "checked": checked}

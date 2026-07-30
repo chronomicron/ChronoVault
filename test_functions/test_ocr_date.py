@@ -50,19 +50,20 @@ for image_path in images:
     if result["date"]:
         found_count += 1
         print(f"[FOUND]   {image_path.name}")
-        print(f"          date={result['date'].strftime('%Y-%m-%d')}  corner={result['corner']}")
+        print(f"          date={result['date'].strftime('%Y-%m-%d')}  corner={result['corner']}  "
+              f"rotation={result['rotation']} degrees")
         print(f"          matched from raw text: {result['raw_text']!r}")
     else:
-        print(f"[NOTHING] {image_path.name}  -- no date pattern matched in any corner")
+        print(f"[NOTHING] {image_path.name}  -- no date pattern matched in any corner/rotation")
 
-    # Always show what OCR actually read in every corner checked, whether
-    # or not a date was found -- this is the important part for real-world
-    # testing. If a corner's raw text visibly looks like a date to a human
-    # but isn't listed above as [FOUND], that's a real pattern/format gap
-    # worth fixing, not just an OCR accuracy problem.
+    # Always show what OCR actually read for every corner/rotation combo
+    # checked, whether or not a date was found -- this is the important
+    # part for real-world testing. If any of it visibly looks like a date
+    # to a human but isn't listed above as [FOUND], that's a real
+    # pattern/format gap worth fixing, not just an OCR accuracy problem.
     for entry in result["checked"]:
         text_display = entry["raw_text"] if entry["raw_text"] else "(no text detected)"
-        print(f"            {entry['corner']:14s} raw OCR text: {text_display!r}")
+        print(f"            {entry['corner']:14s} rot={entry['rotation']:>3} raw OCR text: {text_display!r}")
     print()
 
 print("-" * 60)
