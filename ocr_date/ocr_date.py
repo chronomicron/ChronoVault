@@ -34,15 +34,21 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+import cv2
+import numpy as np
 from PIL import Image
 import pytesseract
+from pytesseract import Output
 
-# How much of the image's width/height each corner crop covers. Date
-# stamps are usually small and close to an edge, but real-world testing
-# showed 25% width was too tight and truncated a longer stamp (a date +
-# time together ran wider than that). Widened accordingly -- still small
-# enough to avoid picking up unrelated content from the rest of the photo.
-CORNER_FRACTION = 0.40
+# Date stamps sit in a thin band along an edge, not a deep square region --
+# real-world testing showed a wide-but-short crop finds them far more
+# reliably than a square one, which dilutes the tiny text with too much
+# unrelated photo content. Width is deliberately close to full-width: a
+# combined date+time stamp can span nearly the entire photo width, and
+# since height is already tightly constrained, a wide crop doesn't risk
+# pulling in much unrelated content the way a wide-AND-tall one would.
+CORNER_WIDTH_FRACTION = 0.95
+CORNER_HEIGHT_FRACTION = 0.25
 
 # Corners are upscaled before OCR -- tesseract is generally much more
 # reliable on larger text than on the small, low-contrast stamps typical
@@ -56,6 +62,16 @@ UPSCALE_FACTOR = 3
 # doesn't produce a valid date -- this is what catches a stamp printed
 # sideways along a photo's edge.
 ROTATIONS_TO_TRY = [0, 90, 180, 270]
+
+# Minimum average per-word OCR confidence (0-100) required before a
+# regex-matched date is actually trusted, rather than discarded as noise.
+# Found necessary after real-world testing: restricting Tesseract to a
+# narrow character whitelist can make it guess a plausible-looking but
+# WRONG digit sequence out of noise, rather than honestly outputting
+# something that clearly fails to parse. A confident, correct read on a
+# clean test image scored 90+ per digit; this threshold is deliberately
+# well below that, to reject only genuinely low-confidence noise.
+MIN_OCR_CONFIDENCE = 40
 
 # Date patterns commonly burned in by consumer date-stamp cameras from
 # the film and early-digital era, roughly in order of how common they are.
@@ -80,6 +96,17 @@ DATE_PATTERNS = [
 TESSERACT_CONFIG = '--psm 7 -c tessedit_char_whitelist="0123456789/:.-\' "'
 
 
+# A digit stamp is never going to predate consumer photography, or be in
+# the future. This catches a specific real failure mode: a single-digit
+# OCR misread (e.g. '2024' read as '1024') otherwise parses as a
+# perfectly valid Python date with nothing to flag it as wrong -- silently
+# confident and silently incorrect. Kept deliberately generous (not tied
+# to analyze_date's stricter 1972 cutoff) since this module only cares
+# about catching obviously-broken OCR reads, not judging plausibility the
+# way analyze_date does once a date reaches Importer.
+EARLIEST_PLAUSIBLE_YEAR = 1900
+
+
 def _parse_date_candidate(text):
     """Try every known date pattern against a block of OCR text; return the first match as a datetime, or None."""
     for pattern, order in DATE_PATTERNS:
@@ -98,16 +125,70 @@ def _parse_date_candidate(text):
                 # Two-digit year -- assume 1900s for anything that looks
                 # like a plausible film-camera year, 2000s otherwise.
                 year += 1900 if year > 30 else 2000
-            return datetime(year, month, day)
+            candidate = datetime(year, month, day)
+            if candidate.year < EARLIEST_PLAUSIBLE_YEAR or candidate > datetime.now():
+                # This is a STRUCTURALLY valid date (real month, real day)
+                # with an implausible year -- almost certainly a single
+                # OCR digit misread (2024 -> 1024), not evidence the text
+                # should be reinterpreted a different way. Stop here rather
+                # than falling through to a weaker pattern, which risks
+                # matching unrelated leftover digits (e.g. from a time
+                # stamp) into a second, different, also-wrong date.
+                return None
+            return candidate
         except ValueError:
-            continue  # not a real date (e.g. month 34) -- keep looking
+            continue  # not a real date at all (e.g. month 34) -- worth trying a different pattern
     return None
 
 
+def _ocr_with_confidence(image):
+    """
+    Run OCR on an image and return (text, average_confidence).
+
+    Uses image_to_data() rather than image_to_string() specifically to
+    get per-word confidence scores back -- image_to_string() only ever
+    returns text, with no way to tell a confident read from a desperate
+    guess. Words Tesseract didn't attach a real confidence to (conf == -1,
+    its convention for "not applicable") are excluded from the average
+    rather than counted as zero.
+    """
+    data = pytesseract.image_to_data(image, config=TESSERACT_CONFIG, output_type=Output.DICT)
+    words = []
+    confidences = []
+    for text, conf in zip(data["text"], data["conf"]):
+        if text.strip():
+            words.append(text)
+            conf = float(conf)
+            if conf >= 0:
+                confidences.append(conf)
+
+    combined_text = " ".join(words)
+    avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+    return combined_text, avg_confidence
+
+
+def _otsu_threshold(pil_image):
+    """
+    Apply Otsu's automatic thresholding -- picks its own black/white cutoff
+    based on the image's own brightness histogram, rather than a fixed
+    guessed number. Dramatically improved real-world recognition of small,
+    low-contrast dot-matrix stamps (the kind security cameras and baby
+    monitors burn in) in testing -- these produced no readable text at all
+    without it. Only actually helps once the crop is already tight around
+    just the text (see CORNER_HEIGHT_FRACTION) -- Otsu on a crop with a lot
+    of unrelated content picks a threshold dominated by that content
+    instead of the tiny text.
+    """
+    arr = np.array(pil_image)
+    _, binarized = cv2.threshold(arr, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return Image.fromarray(binarized)
+
+
 def _get_corner_crops(image):
-    """Return {corner_name: cropped_image} for all four corners."""
+    """Return {corner_name: cropped_image} for all four corners -- wide, short strips."""
     width, height = image.size
-    cw, ch = int(width * CORNER_FRACTION), int(height * CORNER_FRACTION)
+    cw = int(width * CORNER_WIDTH_FRACTION)
+    ch = int(height * CORNER_HEIGHT_FRACTION)
     return {
         "top_left": image.crop((0, 0, cw, ch)),
         "top_right": image.crop((width - cw, 0, width, ch)),
@@ -156,16 +237,31 @@ def find_date_in_corners(file_path, debug_dir=None):
         for rotation in ROTATIONS_TO_TRY:
             rotated = upscaled.rotate(rotation, expand=True) if rotation else upscaled
 
-            if debug_dir:
-                stem = Path(file_path).stem
-                rotated.save(Path(debug_dir) / f"{stem}_{corner_name}_rot{rotation}.png")
+            # Try the plain grayscale crop first, then an Otsu-thresholded
+            # (black/white) version of the same crop -- thresholding helps
+            # a lot on small, low-contrast dot-matrix text, but isn't
+            # always better (it can occasionally hurt a clean, high-
+            # contrast stamp), so both get a chance rather than committing
+            # to one.
+            variants = [("raw", rotated), ("otsu", _otsu_threshold(rotated))]
 
-            raw_text = pytesseract.image_to_string(rotated, config=TESSERACT_CONFIG).strip()
-            checked.append({"corner": corner_name, "rotation": rotation, "raw_text": raw_text})
+            for variant_name, variant_image in variants:
+                if debug_dir:
+                    stem = Path(file_path).stem
+                    variant_image.save(Path(debug_dir) / f"{stem}_{corner_name}_rot{rotation}_{variant_name}.png")
 
-            date = _parse_date_candidate(raw_text)
-            if date:
-                return {"date": date, "corner": corner_name, "rotation": rotation,
-                         "raw_text": raw_text, "checked": checked}
+                raw_text, confidence = _ocr_with_confidence(variant_image)
+                checked.append({"corner": corner_name, "rotation": rotation, "variant": variant_name,
+                                 "raw_text": raw_text, "ocr_confidence": round(confidence, 1)})
 
-    return {"date": None, "corner": None, "rotation": None, "raw_text": None, "checked": checked}
+                date = _parse_date_candidate(raw_text)
+                if date and confidence >= MIN_OCR_CONFIDENCE:
+                    return {"date": date, "corner": corner_name, "rotation": rotation, "variant": variant_name,
+                             "raw_text": raw_text, "ocr_confidence": round(confidence, 1), "checked": checked}
+                # A date-shaped match on low-confidence OCR is exactly the
+                # dangerous case (a plausible-looking wrong guess) --
+                # deliberately NOT returned here, so the search keeps
+                # going instead of accepting it.
+
+    return {"date": None, "corner": None, "rotation": None, "variant": None,
+            "raw_text": None, "ocr_confidence": None, "checked": checked}
