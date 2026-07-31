@@ -107,8 +107,25 @@ TESSERACT_CONFIG = '--psm 7 -c tessedit_char_whitelist="0123456789/:.-\' "'
 EARLIEST_PLAUSIBLE_YEAR = 1900
 
 
+# A punctuation-free match (just digits and spaces, e.g. "24 11 26") has
+# no structural evidence it's actually a date rather than three
+# coincidentally date-shaped numbers OCR produced from noise -- unlike a
+# match with real separators (., /, -, ') like "07.20.2010", which is a
+# much stronger claim. Found necessary live: a bare-digit misread and a
+# genuinely correct punctuated match had confidence scores only ~4 points
+# apart (51.3 vs 55.0) -- too close to separate with one threshold, so
+# bare-digit matches get held to a stricter one instead.
+MIN_OCR_CONFIDENCE_NO_PUNCTUATION = 65
+
+
 def _parse_date_candidate(text):
-    """Try every known date pattern against a block of OCR text; return the first match as a datetime, or None."""
+    """
+    Try every known date pattern against a block of OCR text.
+    Returns (datetime or None, has_punctuation: bool) -- has_punctuation
+    reflects whether the actual matched text included a real separator
+    character, not just whitespace, and is meaningless when the date is
+    None.
+    """
     for pattern, order in DATE_PATTERNS:
         match = re.search(pattern, text)
         if not match:
@@ -134,11 +151,12 @@ def _parse_date_candidate(text):
                 # than falling through to a weaker pattern, which risks
                 # matching unrelated leftover digits (e.g. from a time
                 # stamp) into a second, different, also-wrong date.
-                return None
-            return candidate
+                return None, False
+            has_punctuation = any(ch in match.group(0) for ch in "-./'")
+            return candidate, has_punctuation
         except ValueError:
             continue  # not a real date at all (e.g. month 34) -- worth trying a different pattern
-    return None
+    return None, False
 
 
 def _ocr_with_confidence(image):
@@ -254,8 +272,9 @@ def find_date_in_corners(file_path, debug_dir=None):
                 checked.append({"corner": corner_name, "rotation": rotation, "variant": variant_name,
                                  "raw_text": raw_text, "ocr_confidence": round(confidence, 1)})
 
-                date = _parse_date_candidate(raw_text)
-                if date and confidence >= MIN_OCR_CONFIDENCE:
+                date, has_punctuation = _parse_date_candidate(raw_text)
+                required_confidence = MIN_OCR_CONFIDENCE if has_punctuation else MIN_OCR_CONFIDENCE_NO_PUNCTUATION
+                if date and confidence >= required_confidence:
                     return {"date": date, "corner": corner_name, "rotation": rotation, "variant": variant_name,
                              "raw_text": raw_text, "ocr_confidence": round(confidence, 1), "checked": checked}
                 # A date-shaped match on low-confidence OCR is exactly the
