@@ -12,8 +12,9 @@ labeler following the same "hand me evidence, get back a scored answer"
 pattern) builds a small evidence bundle and calls analyze_date() with it.
 
 DESIGN NOTE -- built for more evidence than we currently have:
-Right now there are only two possible signals: EXIF (DateTimeOriginal or
-DateTimeDigitized) and the filesystem creation date. But cameras also
+There are currently three signals: EXIF GPS timestamp (from the satellite,
+independent of the camera's clock), EXIF (DateTimeOriginal or
+DateTimeDigitized), and the filesystem creation date. But cameras also
 often bake the date into the filename (e.g. IMG_20260720_123957.jpg), and
 some cameras (Canon SLRs, for instance) write a separate .THM sidecar file
 per shot with its own embedded metadata. Both are realistic future
@@ -38,6 +39,7 @@ EARLIEST_PLAUSIBLE_DATE = datetime(1972, 7, 26)
 # Starting confidence (0-100) for a signal, before any agreement/mismatch
 # adjustment, based purely on how trustworthy that kind of source is.
 BASE_CONFIDENCE = {
+    'exif_gps': 98,          # from satellite time, not the camera's own clock -- see get_gps_datetime()
     'exif_original': 95,
     'exif_digitized': 85,
     'filesystem_fallback': 30,
@@ -74,6 +76,42 @@ def get_photo_date_from_exif(readable_exif):
     return None, None
 
 
+def get_gps_datetime(readable_exif):
+    """
+    Pull a date/time out of EXIF GPSDateStamp + GPSTimeStamp, if present.
+
+    This comes from the satellite signal at the moment of capture, not
+    the camera's own internal clock -- so it's immune to a wrong or
+    never-set camera clock, a common real-world source of bad
+    DateTimeOriginal values. Note the result is in UTC, while
+    DateTimeOriginal is typically local time; a several-hour difference
+    near a timezone boundary is expected, not necessarily a disagreement
+    (the existing mismatch_threshold_days tolerance already absorbs a
+    small gap like this in most cases).
+    """
+    from PIL.ExifTags import GPSTAGS
+
+    gps_info = readable_exif.get('GPSInfo')
+    if not gps_info:
+        return None
+
+    gps_tags = {GPSTAGS.get(key, key): value for key, value in gps_info.items()}
+    date_stamp = gps_tags.get('GPSDateStamp')
+    time_stamp = gps_tags.get('GPSTimeStamp')
+    if not date_stamp:
+        return None
+
+    try:
+        year, month, day = (int(part) for part in date_stamp.split(':'))
+        if time_stamp:
+            hour, minute, second = (int(float(part)) for part in time_stamp)
+        else:
+            hour = minute = second = 0
+        return datetime(year, month, day, hour, minute, second)
+    except (ValueError, TypeError):
+        return None
+
+
 def get_filesystem_creation_date(file_path):
     """File system creation date, used as a fallback and for cross-checking other signals."""
     try:
@@ -86,6 +124,7 @@ def get_filesystem_creation_date(file_path):
 def describe_signal(signal):
     """Short human-readable label for a signal, used to build the 'reason' string."""
     labels = {
+        'exif_gps': 'EXIF GPS timestamp',
         'exif_original': 'EXIF (DateTimeOriginal)',
         'exif_digitized': 'EXIF (DateTimeDigitized)',
         'filesystem_fallback': 'filesystem creation date',
@@ -116,6 +155,14 @@ def gather_signals(file_path, readable_exif):
     source is added.
     """
     signals = []
+
+    gps_date = get_gps_datetime(readable_exif)
+    if gps_date:
+        signals.append({
+            'date': gps_date,
+            'source': 'exif_gps',
+            'base_confidence': BASE_CONFIDENCE['exif_gps'],
+        })
 
     exif_date, exif_tag = get_photo_date_from_exif(readable_exif)
     if exif_date:
