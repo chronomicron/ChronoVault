@@ -76,14 +76,16 @@ Confidence is always clamped to the 0–100 range. Below **50**, `date_uncertain
 
 ## Adding a New Evidence Source (Future Work)
 
-Two realistic future sources, not yet implemented:
+Realistic future sources, not yet implemented:
 
 - **Filename-derived dates** — many cameras and phones bake the date into the filename itself (e.g. `IMG_20260720_123957.jpg`). When EXIF is missing, this could be a much better signal than the filesystem date alone.
 - **Camera sidecar files** — some cameras (Canon SLRs, for instance) write a separate `.THM` file per shot with its own embedded metadata, independent of the main file's EXIF.
+- **XMP / IPTC metadata** — editors like Photoshop and Lightroom embed their own metadata (separate from EXIF), often including `CreateDate`/`ModifyDate` fields. A photo edited even once in one of these tools may carry this alongside, or instead of, usable EXIF.
+- **OCR corner-stamp detection** — a working proof-of-concept already exists in `ocr_date/` (see its README), for photos with a printed/imprinted date visible in a corner (old date-stamp cameras, scanned prints). Not yet wired in here, and deliberately meant to be an opt-in "look for more clues" step rather than run automatically — it's slow, and only useful for exactly the files that already have weak or no other evidence.
 
-Adding either just means:
+Adding any of these just means:
 
-1. Add a base confidence entry to `BASE_CONFIDENCE` (there are commented-out placeholder entries already there for both).
+1. Add a base confidence entry to `BASE_CONFIDENCE` (there are commented-out placeholder entries already there for the first two).
 2. In `gather_signals()`, read the new source and, if a date was found, append one more entry to the `signals` list — same shape as the existing EXIF/filesystem entries.
 
 Nothing in `analyze_date()` itself needs to change — the primary-selection and agreement/mismatch logic already works for any number of signals. In particular, if EXIF, the filesystem date, *and* the filename all agree, that's automatically worth more (three agreement bonuses instead of one) without any special-case code for "three-way agreement."
