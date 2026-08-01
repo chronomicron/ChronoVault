@@ -74,6 +74,20 @@ Confidence is always clamped to the 0–100 range. Below **50**, `date_uncertain
 | Any date before 1972 or in the future                    | ≤5         | `... -- date is implausible (before cameras existed, or in the future)`          |
 | No evidence at all (no EXIF, file doesn't exist)          | 0          | `No date evidence available (no EXIF, no filesystem date)`                       |
 
+## Design Note: This Is Meant to Work Beyond Photos
+
+The scoring engine in `analyze_date()` doesn't know or care what kind of file it's dating — it only ever combines a list of `{date, source, base_confidence}` signals, whatever their origin. Nothing in the primary-selection, agreement-bonus, mismatch-penalty, or implausibility logic assumes "this came from a photo." That's deliberate: the eventual goal is archiving more than just photos and video (e.g. MP3 recordings of meetings), and each new media type should only need its own evidence-gathering, not its own scoring logic.
+
+What *is* currently photo-specific is `gather_signals()` — it unconditionally tries EXIF and GPS extraction, regardless of file type. For a non-image file, `readable_exif` just comes in empty, so it silently falls through to the filesystem date rather than using any type-specific evidence that might actually be sitting in the file.
+
+Adding support for a new media type (MP3, for example — which carries its own ID3v2 date tags like `TDRC`, plus often a date in the filename, exactly like photos and EXIF) means:
+
+1. Write a new evidence-gathering function for that type (e.g. reading ID3 tags), following the same "look for a date, return `None` if not found" shape as `get_photo_date_from_exif()`.
+2. Add a base confidence entry to `BASE_CONFIDENCE` for the new source.
+3. Make `gather_signals()` (or its caller) type-aware — e.g. dispatch on file extension to call the right evidence-gathering functions for that type, instead of always trying the photo-specific ones.
+
+`analyze_date()` itself shouldn't need to change at all — it already just wants a list of signals, from wherever they came from.
+
 ## Adding a New Evidence Source (Future Work)
 
 Realistic future sources, not yet implemented:
