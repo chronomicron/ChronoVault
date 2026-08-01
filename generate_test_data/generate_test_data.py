@@ -112,6 +112,10 @@ def parse_args():
         help="How many fake unreadable .mp4 files to create (default: 5)"
     )
     parser.add_argument(
+        "--metadata-samples", type=int, default=3,
+        help="How many of each GPS/XMP category to generate (default: 3)"
+    )
+    parser.add_argument(
         "--seed", type=int, default=None,
         help="Random seed for a reproducible run (default: random each time)"
     )
@@ -126,7 +130,7 @@ def pick_camera():
     return random.choice(CAMERAS)
 
 
-def build_exif_bytes(date_str=None, make=None, model=None):
+def build_exif_bytes(date_str=None, make=None, model=None, gps_date_str=None, gps_time_tuple=None):
     """
     Hand-build a minimal raw EXIF (TIFF) blob byte-by-byte with struct,
     rather than using Pillow's higher-level Image.Exif()/get_ifd() class.
@@ -140,62 +144,81 @@ def build_exif_bytes(date_str=None, make=None, model=None):
     change.
 
     Layout: "Exif\\x00\\x00" marker + little-endian TIFF header + IFD0
-    (Make/Model, plus a pointer to the Exif sub-IFD if there's a date) +
-    Exif sub-IFD (DateTimeOriginal).
+    (Make/Model, plus pointers to whichever sub-IFDs are present) + Exif
+    sub-IFD (DateTimeOriginal) + GPS sub-IFD (GPSDateStamp, GPSTimeStamp).
+
+    gps_time_tuple is (hour, minute, second) as plain integers -- written
+    as EXIF RATIONAL values (numerator/denominator pairs, denominator 1),
+    which is the type GPSTimeStamp requires.
     """
     def ascii_field(text):
         return text.encode('ascii') + b'\x00'
 
+    def rational(numerator, denominator=1):
+        return struct.pack('<II', numerator, denominator)
+
     ifd0_fields = []
     if make:
-        ifd0_fields.append((271, ascii_field(make)))   # Make
+        ifd0_fields.append((271, 2, ascii_field(make)))   # Make
     if model:
-        ifd0_fields.append((272, ascii_field(model)))  # Model
+        ifd0_fields.append((272, 2, ascii_field(model)))  # Model
 
     exif_fields = []
     if date_str:
-        exif_fields.append((36867, ascii_field(date_str)))  # DateTimeOriginal
+        exif_fields.append((36867, 2, ascii_field(date_str)))  # DateTimeOriginal
 
-    # +1 entry in IFD0 for the ExifOffset pointer, only if we actually have
-    # an Exif sub-IFD to point to.
-    n0 = len(ifd0_fields) + (1 if exif_fields else 0)
+    gps_fields = []
+    if gps_date_str:
+        gps_fields.append((29, 2, ascii_field(gps_date_str)))  # GPSDateStamp, ASCII
+    if gps_time_tuple:
+        hour, minute, second = gps_time_tuple
+        gps_time_value = rational(hour) + rational(minute) + rational(second)
+        gps_fields.append((7, 5, gps_time_value))  # GPSTimeStamp, type 5 = RATIONAL, 3 values
+
+    # +1 entry in IFD0 for each sub-IFD pointer actually needed (ExifOffset, GPSInfo).
+    n0 = len(ifd0_fields) + (1 if exif_fields else 0) + (1 if gps_fields else 0)
     ifd0_size = 2 + 12 * n0 + 4
     ifd0_offset = 8  # right after the 8-byte TIFF header
     cursor = ifd0_offset + ifd0_size
 
-    ifd0_extra = bytearray()
-    ifd0_entries = []
-    for tag, val in ifd0_fields:
-        count = len(val)
-        if count <= 4:
-            value_field = val + b'\x00' * (4 - count)
-        else:
-            value_field = struct.pack('<I', cursor)
-            ifd0_extra += val
-            cursor += count
-        ifd0_entries.append((tag, 2, count, value_field))  # type 2 = ASCII
+    def layout_fields(fields, cursor):
+        """Lay out a list of (tag, type, value_bytes) into TIFF entries, external data if needed."""
+        entries = []
+        extra = bytearray()
+        for tag, typ, val in fields:
+            count = len(val) if typ == 2 else (len(val) // 8)  # ASCII: byte count; RATIONAL: 8 bytes/value
+            if typ == 2 and count <= 4:
+                value_field = val + b'\x00' * (4 - count)
+            else:
+                # RATIONAL is always >4 bytes, and any ASCII field over 4
+                # bytes -- both always go to external "extra" data.
+                value_field = struct.pack('<I', cursor)
+                extra += val
+                cursor += len(val)
+            entries.append((tag, typ, count, value_field))
+        return entries, extra, cursor
 
-    exif_ifd_offset = cursor
-    exif_ifd_size = 2 + 12 * len(exif_fields) + 4
-    cursor2 = exif_ifd_offset + exif_ifd_size
+    ifd0_entries, ifd0_extra, cursor = layout_fields(ifd0_fields, cursor)
 
-    exif_extra = bytearray()
-    exif_entries = []
-    for tag, val in exif_fields:
-        count = len(val)
-        if count <= 4:
-            value_field = val + b'\x00' * (4 - count)
-        else:
-            value_field = struct.pack('<I', cursor2)
-            exif_extra += val
-            cursor2 += count
-        exif_entries.append((tag, 2, count, value_field))
-
+    exif_entries, exif_extra = [], bytearray()
     if exif_fields:
+        exif_ifd_offset = cursor
+        exif_ifd_size = 2 + 12 * len(exif_fields) + 4
+        cursor = exif_ifd_offset + exif_ifd_size
+        exif_entries, exif_extra, cursor = layout_fields(exif_fields, cursor)
         ifd0_entries.append((0x8769, 4, 1, struct.pack('<I', exif_ifd_offset)))  # ExifOffset, type 4 = LONG
+
+    gps_entries, gps_extra = [], bytearray()
+    if gps_fields:
+        gps_ifd_offset = cursor
+        gps_ifd_size = 2 + 12 * len(gps_fields) + 4
+        cursor = gps_ifd_offset + gps_ifd_size
+        gps_entries, gps_extra, cursor = layout_fields(gps_fields, cursor)
+        ifd0_entries.append((0x8825, 4, 1, struct.pack('<I', gps_ifd_offset)))  # GPSInfo pointer, type 4 = LONG
 
     ifd0_entries.sort(key=lambda e: e[0])   # TIFF requires tags sorted ascending within an IFD
     exif_entries.sort(key=lambda e: e[0])
+    gps_entries.sort(key=lambda e: e[0])
 
     out = bytearray()
     out += b'Exif\x00\x00'
@@ -214,29 +237,67 @@ def build_exif_bytes(date_str=None, make=None, model=None):
         out += struct.pack('<I', 0)
         out += exif_extra
 
+    if gps_fields:
+        out += struct.pack('<H', len(gps_entries))
+        for tag, typ, count, value_field in gps_entries:
+            out += struct.pack('<HHI', tag, typ, count) + value_field
+        out += struct.pack('<I', 0)
+        out += gps_extra
+
     return bytes(out)
 
 
-def make_image(path, exif_date=None):
+def build_xmp_packet(create_date=None, modify_date=None):
     """
-    Create a tiny JPEG at `path`. If exif_date is given, write it as
-    DateTimeOriginal (plus a random camera make/model); if None, the
-    image is saved with no EXIF data at all.
+    Build a minimal, realistic XMP packet as UTF-8 bytes, suitable for
+    Image.save(..., xmp=<these bytes>). ISO 8601 timestamps, no timezone
+    (matching get_xmp_datetime's expectation of naive datetimes).
+    """
+    fields = ""
+    if create_date:
+        fields += f"   <xmp:CreateDate>{create_date.strftime('%Y-%m-%dT%H:%M:%S')}</xmp:CreateDate>\n"
+    if modify_date:
+        fields += f"   <xmp:ModifyDate>{modify_date.strftime('%Y-%m-%dT%H:%M:%S')}</xmp:ModifyDate>\n"
+
+    packet = f'''<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/">
+{fields}  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>'''
+    return packet.encode('utf-8')
+
+
+def make_image(path, exif_date=None, gps_date=None, xmp_create_date=None, xmp_modify_date=None):
+    """
+    Create a tiny JPEG at `path`. exif_date, if given, is written as
+    DateTimeOriginal (plus a random camera make/model). gps_date, if
+    given, is written as GPSDateStamp/GPSTimeStamp. xmp_create_date and
+    xmp_modify_date, if given, are written into an XMP packet. Any/all of
+    these can be combined, or all left None for a plain image with no
+    metadata at all.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     img = Image.new('RGB', (20, 20), color=random_color())
 
-    if exif_date is None:
-        img.save(path, "jpeg")
-        return
+    save_kwargs = {}
 
-    make, model = pick_camera()
-    exif_bytes = build_exif_bytes(
-        date_str=exif_date.strftime("%Y:%m:%d %H:%M:%S"),
-        make=make,
-        model=model,
-    )
-    img.save(path, "jpeg", exif=exif_bytes)
+    if exif_date is not None or gps_date is not None:
+        make, model = pick_camera()
+        save_kwargs["exif"] = build_exif_bytes(
+            date_str=exif_date.strftime("%Y:%m:%d %H:%M:%S") if exif_date else None,
+            make=make,
+            model=model,
+            gps_date_str=gps_date.strftime("%Y:%m:%d") if gps_date else None,
+            gps_time_tuple=(gps_date.hour, gps_date.minute, gps_date.second) if gps_date else None,
+        )
+
+    if xmp_create_date is not None or xmp_modify_date is not None:
+        save_kwargs["xmp"] = build_xmp_packet(create_date=xmp_create_date, modify_date=xmp_modify_date)
+
+    img.save(path, "jpeg", **save_kwargs)
 
 
 def make_junk_video(path):
@@ -250,17 +311,23 @@ def random_subfolder(root):
     return root / random.choice(SUBFOLDERS)
 
 
-def generate_category(root, category, filename_prefix, count, exif_date_fn):
-    """Generate `count` images for one scenario category, scattered across folders."""
+def generate_category(root, category, filename_prefix, count, kwargs_fn):
+    """
+    Generate `count` images for one scenario category, scattered across
+    folders. kwargs_fn(), called once per image, returns a dict of
+    make_image() keyword arguments (exif_date, gps_date, xmp_create_date,
+    xmp_modify_date -- any combination) -- or None for a plain image with
+    no metadata at all.
+    """
     created = []
     for i in range(1, count + 1):
         folder = random_subfolder(root)
         filename = f"{filename_prefix}_{i:04d}.jpg"
         path = folder / filename
-        exif_date = exif_date_fn() if exif_date_fn else None
-        make_image(path, exif_date=exif_date)
+        kwargs = kwargs_fn() if kwargs_fn else {}
+        make_image(path, **(kwargs or {}))
         created.append(path)
-    print(f"  {category:12s} {count:4d} file(s) -> e.g. {created[0].relative_to(root)}")
+    print(f"  {category:14s} {count:4d} file(s) -> e.g. {created[0].relative_to(root)}")
     return created
 
 
@@ -285,12 +352,12 @@ def main():
 
     match_files = generate_category(
         root, "match", "match", n_match,
-        lambda: now - timedelta(minutes=random.randint(0, 30))
+        lambda: {"exif_date": now - timedelta(minutes=random.randint(0, 30))}
     )
 
     generate_category(
         root, "mismatch", "mismatch", n_mismatch,
-        lambda: now - timedelta(days=random.randint(30, 1000))
+        lambda: {"exif_date": now - timedelta(days=random.randint(30, 1000))}
     )
 
     generate_category(
@@ -308,7 +375,55 @@ def main():
 
     generate_category(
         root, "implausible", "implausible", n_implausible,
-        implausible_date
+        lambda: {"exif_date": implausible_date()}
+    )
+
+    # GPS and XMP categories -- a smaller, fixed set each, specifically to
+    # exercise the exif_gps and xmp_create_date/xmp_modify_date signals in
+    # analyze_date. Not scaled by --count, same reasoning as duplicates/junk
+    # video below: these are targeted feature tests, not bulk volume.
+    n = args.metadata_samples
+
+    generate_category(
+        root, "gps_agree", "gpsagree", n,
+        lambda: {"exif_date": (d := now - timedelta(days=random.randint(1, 60))), "gps_date": d}
+    )
+
+    generate_category(
+        root, "gps_disagree", "gpsdisagree", n,
+        # Simulates a camera with a wrong/never-set internal clock, but a
+        # correct GPS receiver -- GPS should still win as primary.
+        lambda: {"exif_date": now - timedelta(days=random.randint(500, 2000)),
+                  "gps_date": now - timedelta(days=random.randint(1, 10))}
+    )
+
+    generate_category(
+        root, "gps_only", "gpsonly", n,
+        lambda: {"gps_date": now - timedelta(days=random.randint(1, 60))}
+    )
+
+    generate_category(
+        root, "xmp_agree", "xmpagree", n,
+        lambda: {"exif_date": (d := now - timedelta(days=random.randint(1, 60))), "xmp_create_date": d}
+    )
+
+    generate_category(
+        root, "xmp_disagree", "xmpdisagree", n,
+        # Simulates a photo re-exported/reprocessed long after it was
+        # taken -- EXIF should still win as primary over XMP.
+        lambda: {"exif_date": now - timedelta(days=random.randint(500, 2000)),
+                  "xmp_create_date": now - timedelta(days=random.randint(1, 10))}
+    )
+
+    generate_category(
+        root, "xmp_only", "xmponly", n,
+        lambda: {"xmp_create_date": now - timedelta(days=random.randint(1, 60))}
+    )
+
+    generate_category(
+        root, "xmp_modify_only", "xmpmodifyonly", n,
+        # No CreateDate at all -- only the much-weaker ModifyDate signal.
+        lambda: {"xmp_modify_date": now - timedelta(days=random.randint(1, 60))}
     )
 
     # Duplicate set: take a few 'match' files and copy them (same filename,
@@ -323,7 +438,7 @@ def main():
             dest = dest_dir / original.name
             dest.write_bytes(original.read_bytes())
             dup_count += 1
-    print(f"  {'duplicates':12s} {dup_count:4d} file(s) -> {len(dup_originals)} original(s) x "
+    print(f"  {'duplicates':14s} {dup_count:4d} file(s) -> {len(dup_originals)} original(s) x "
           f"{len(DUPLICATE_FOLDERS)} backup folder(s)")
 
     # Junk video files: exercise Importer's handling of files it can't read
@@ -331,19 +446,28 @@ def main():
     for i in range(1, args.junk_videos + 1):
         folder = random_subfolder(root)
         make_junk_video(folder / f"junk_video_{i:04d}.mp4")
-    print(f"  {'junk video':12s} {args.junk_videos:4d} file(s) -> unreadable .mp4 placeholders")
+    print(f"  {'junk video':14s} {args.junk_videos:4d} file(s) -> unreadable .mp4 placeholders")
 
-    total = n_match + n_mismatch + n_no_exif + n_implausible + dup_count + args.junk_videos
+    total = (n_match + n_mismatch + n_no_exif + n_implausible + dup_count + args.junk_videos
+             + n * 7)
     print("-" * 60)
     print(f"Total files generated: {total}")
     print()
     print("Expected behavior when you run this through ChronoVault:")
-    print(f"  match        -> confidence ~100, normal YYYY/MM/DD folder")
-    print(f"  mismatch     -> confidence ~70,  normal YYYY/MM/DD folder (flagged less certain)")
-    print(f"  no_exif      -> confidence 30,   routed to _review_needed/")
-    print(f"  implausible  -> confidence ~5,   routed to _review_needed/")
-    print(f"  duplicates   -> should be found and grouped by Duplicate Finder")
-    print(f"  junk video   -> no EXIF readable, behaves like a no_exif file "
+    print(f"  match            -> confidence ~100, normal YYYY/MM/DD folder")
+    print(f"  mismatch         -> confidence ~70,  normal YYYY/MM/DD folder (flagged less certain)")
+    print(f"  no_exif          -> confidence 30,   routed to _review_needed/")
+    print(f"  implausible      -> confidence ~5,   routed to _review_needed/")
+    print(f"  gps_agree        -> confidence ~100+, source=exif_gps (GPS + EXIF confirm each other)")
+    print(f"  gps_disagree     -> source=exif_gps wins despite EXIF disagreeing (bad camera clock case)")
+    print(f"  gps_only         -> source=exif_gps, no EXIF date present at all")
+    print(f"  xmp_agree        -> source=exif_original, confirmed by XMP CreateDate")
+    print(f"  xmp_disagree     -> source=exif_original wins despite XMP disagreeing (reprocessed later)")
+    print(f"  xmp_only         -> source=xmp_create_date, confidence ~80, no EXIF at all")
+    print(f"  xmp_modify_only  -> source=filesystem_fallback (outranks xmp_modify_date's low confidence),")
+    print(f"                      low confidence overall, routed to _review_needed/")
+    print(f"  duplicates       -> should be found and grouped by Duplicate Finder")
+    print(f"  junk video       -> no EXIF readable, behaves like a no_exif file "
           f"(excluded if require_exif=true)")
     print()
     print(f"Point Indexer at: {root}")
