@@ -34,6 +34,8 @@ from datetime import datetime
 
 from PIL import Image
 
+from .image_tools.tiff_tools import get_tiff_datetime
+
 # No digital camera existed before this date, so any "date taken" earlier
 # than this is treated as implausible. (Also happens to be the author's
 # birthday -- also predates digital cameras. Small tribute, not a bug.)
@@ -45,6 +47,7 @@ BASE_CONFIDENCE = {
     'exif_gps': 98,          # from satellite time, not the camera's own clock -- see get_gps_datetime()
     'exif_original': 95,
     'exif_digitized': 85,
+    'tiff_datetime': 90,     # TIFF's own baseline DateTime tag -- see get_tiff_datetime()
     'xmp_create_date': 80,   # xmp:CreateDate or photoshop:DateCreated -- see get_xmp_datetime()
     'filesystem_fallback': 30,
     'xmp_modify_date': 20,   # reflects a LATER edit, not original creation -- weak fallback only
@@ -216,6 +219,7 @@ def describe_signal(signal):
         'exif_gps': 'EXIF GPS timestamp',
         'exif_original': 'EXIF (DateTimeOriginal)',
         'exif_digitized': 'EXIF (DateTimeDigitized)',
+        'tiff_datetime': 'TIFF DateTime tag',
         'xmp_create_date': 'XMP creation date',
         'xmp_modify_date': 'XMP modify date',
         'filesystem_fallback': 'filesystem creation date',
@@ -223,54 +227,67 @@ def describe_signal(signal):
     return labels.get(signal['source'], signal['source'])
 
 
-def gather_signals(file_path, readable_exif):
+# Extensions treated as "JPEG-family" (EXIF/GPS/XMP signals) vs TIFF
+# (its own baseline DateTime tag). Add new types here as new evidence-
+# gathering functions are built for them.
+JPEG_LIKE_EXTENSIONS = {'.jpg', '.jpeg'}
+TIFF_EXTENSIONS = {'.tif', '.tiff'}
+
+
+def gather_signals(file_path, readable_exif, file_type):
     """
-    Collect every date signal we currently know how to read for a file.
+    Collect every date signal we currently know how to read for a file --
+    dispatched by file_type, since different file types carry evidence in
+    completely different places (EXIF/GPS/XMP live in JPEG's APP1
+    segments; TIFF has its own baseline DateTime tag; a future MP3/MP4
+    signal would come from ID3 tags or a container atom, nothing like
+    either of these).
+
     Returns (signals, filesystem_creation_date) where signals is a list of
-    dicts: {'date': datetime, 'source': str, 'base_confidence': int}
+    dicts: {'date': datetime, 'source': str, 'base_confidence': int}.
+    filesystem_creation_date always applies, regardless of file type.
 
-    Future signal sources (not yet implemented) would each add zero or one
-    entry here, e.g.:
-        filename_date = get_date_from_filename(file_path)
-        if filename_date:
-            signals.append({'date': filename_date, 'source': 'filename_pattern',
-                             'base_confidence': BASE_CONFIDENCE['filename_pattern']})
-
-        sidecar_date = get_date_from_thm_sidecar(file_path)
-        if sidecar_date:
-            signals.append({'date': sidecar_date, 'source': 'sidecar_thm',
-                             'base_confidence': BASE_CONFIDENCE['sidecar_thm']})
-
-    Everything in analyze_date() already knows how to combine however many
-    signals end up in the list -- no changes needed there when a new
-    source is added.
+    Adding a new file type means adding a new branch here that calls its
+    own evidence-gathering function(s) -- everything in analyze_date()
+    itself already knows how to combine however many signals end up in
+    the list, with no changes needed there.
     """
     signals = []
 
-    gps_date = get_gps_datetime(readable_exif)
-    if gps_date:
-        signals.append({
-            'date': gps_date,
-            'source': 'exif_gps',
-            'base_confidence': BASE_CONFIDENCE['exif_gps'],
-        })
+    if file_type in JPEG_LIKE_EXTENSIONS:
+        gps_date = get_gps_datetime(readable_exif)
+        if gps_date:
+            signals.append({
+                'date': gps_date,
+                'source': 'exif_gps',
+                'base_confidence': BASE_CONFIDENCE['exif_gps'],
+            })
 
-    exif_date, exif_tag = get_photo_date_from_exif(readable_exif)
-    if exif_date:
-        source = 'exif_original' if exif_tag == 'DateTimeOriginal' else 'exif_digitized'
-        signals.append({
-            'date': exif_date,
-            'source': source,
-            'base_confidence': BASE_CONFIDENCE[source],
-        })
+        exif_date, exif_tag = get_photo_date_from_exif(readable_exif)
+        if exif_date:
+            source = 'exif_original' if exif_tag == 'DateTimeOriginal' else 'exif_digitized'
+            signals.append({
+                'date': exif_date,
+                'source': source,
+                'base_confidence': BASE_CONFIDENCE[source],
+            })
 
-    xmp_date, xmp_source = get_xmp_datetime(file_path)
-    if xmp_date:
-        signals.append({
-            'date': xmp_date,
-            'source': xmp_source,
-            'base_confidence': BASE_CONFIDENCE[xmp_source],
-        })
+        xmp_date, xmp_source = get_xmp_datetime(file_path)
+        if xmp_date:
+            signals.append({
+                'date': xmp_date,
+                'source': xmp_source,
+                'base_confidence': BASE_CONFIDENCE[xmp_source],
+            })
+
+    elif file_type in TIFF_EXTENSIONS:
+        tiff_date = get_tiff_datetime(file_path)
+        if tiff_date:
+            signals.append({
+                'date': tiff_date,
+                'source': 'tiff_datetime',
+                'base_confidence': BASE_CONFIDENCE['tiff_datetime'],
+            })
 
     fs_date = get_filesystem_creation_date(file_path)
     if fs_date:
@@ -290,14 +307,20 @@ def analyze_date(evidence):
     'evidence' is a dict describing what we know about the file:
         {
             'file_path': ...,               # required
-            'readable_exif': {...},         # EXIF tag dict, or {} if none
+            'readable_exif': {...},         # EXIF tag dict, or {} if none -- only used for JPEG-family files
             'mismatch_threshold_days': 1,   # days of disagreement allowed before signals "disagree"
+            'file_type': '.mp3',            # optional -- overrides extension-based type detection
         }
+
+    'file_type', if given, determines which evidence-gathering functions
+    run (see gather_signals()) -- pass this when the caller already knows
+    the real type and it might not match the extension. If omitted, the
+    type is inferred from the file's own extension.
 
     Returns a dict:
         {
             'date_taken': datetime or None,
-            'date_source': 'exif_original' | 'exif_digitized' | 'filesystem_fallback' | None,
+            'date_source': 'exif_original' | 'exif_digitized' | 'tiff_datetime' | 'filesystem_fallback' | None,
             'filesystem_creation_date': datetime or None,
             'confidence': int (0-100),
             'reason': str,               # short human-readable explanation
@@ -307,8 +330,9 @@ def analyze_date(evidence):
     file_path = evidence['file_path']
     readable_exif = evidence.get('readable_exif', {})
     mismatch_threshold_days = evidence.get('mismatch_threshold_days', 1)
+    file_type = evidence.get('file_type') or Path(file_path).suffix.lower()
 
-    signals, fs_date = gather_signals(file_path, readable_exif)
+    signals, fs_date = gather_signals(file_path, readable_exif, file_type)
 
     if not signals:
         return {
