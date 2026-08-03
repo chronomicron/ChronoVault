@@ -1,0 +1,14 @@
+{
+    "_comment": "DRAFT SCHEMA -- not yet read by any code. Placeholder for the planned analyze_date CLI, matching Indexer/Importer's config.json pattern. Subject to change as the actual CLI gets built.",
+
+    "input_mode": "database",
+    "database_path": "located_files.db",
+
+    "output_mode": "database",
+    "report_output_path": "date_analysis_report.json",
+
+    "use_ocr_below_confidence": 50,
+    "worker_threads": 4,
+
+    "already_analyzed_skip": true
+}
