@@ -28,14 +28,13 @@ signal to the list built in gather_signals() -- the combination logic in
 analyze_date() below doesn't change.
 """
 
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from datetime import datetime
 
-from PIL import Image
-
 from .image_tools.tiff_tools import get_tiff_datetime
 from .image_tools.exif_tools import get_photo_date_from_exif
+from .image_tools.gps_tools import get_gps_datetime
+from .image_tools.xmp_tools import get_xmp_datetime
 
 # No digital camera existed before this date, so any "date taken" earlier
 # than this is treated as implausible. (Also happens to be the author's
@@ -73,126 +72,6 @@ IMPLAUSIBLE_CONFIDENCE_CAP = 5
 UNCERTAIN_THRESHOLD = 50
 
 
-def get_gps_datetime(readable_exif):
-    """
-    Pull a date/time out of EXIF GPSDateStamp + GPSTimeStamp, if present.
-
-    This comes from the satellite signal at the moment of capture, not
-    the camera's own internal clock -- so it's immune to a wrong or
-    never-set camera clock, a common real-world source of bad
-    DateTimeOriginal values. Note the result is in UTC, while
-    DateTimeOriginal is typically local time; a several-hour difference
-    near a timezone boundary is expected, not necessarily a disagreement
-    (the existing mismatch_threshold_days tolerance already absorbs a
-    small gap like this in most cases).
-    """
-    from PIL.ExifTags import GPSTAGS
-
-    gps_info = readable_exif.get('GPSInfo')
-    if not gps_info:
-        return None
-
-    gps_tags = {GPSTAGS.get(key, key): value for key, value in gps_info.items()}
-    date_stamp = gps_tags.get('GPSDateStamp')
-    time_stamp = gps_tags.get('GPSTimeStamp')
-    if not date_stamp:
-        return None
-
-    try:
-        year, month, day = (int(part) for part in date_stamp.split(':'))
-        if time_stamp:
-            hour, minute, second = (int(float(part)) for part in time_stamp)
-        else:
-            hour = minute = second = 0
-        return datetime(year, month, day, hour, minute, second)
-    except (ValueError, TypeError):
-        return None
-
-
-def _parse_xmp_date_string(text):
-    """
-    Parse an XMP date string. Follows ISO 8601, but XMP allows several
-    levels of precision (date-only, with time, with/without a timezone
-    offset) -- this handles all of them.
-
-    Any timezone offset is deliberately stripped after parsing, so the
-    result is a naive datetime like every other signal in this module
-    (EXIF and filesystem dates are already naive/local, un-normalized --
-    this keeps XMP consistent with that existing looseness rather than
-    introducing a new kind of inconsistency).
-    """
-    text = text.strip()
-    if text.endswith('Z'):
-        text = text[:-1] + '+00:00'
-    try:
-        parsed = datetime.fromisoformat(text)
-        return parsed.replace(tzinfo=None)
-    except ValueError:
-        pass
-    try:
-        return datetime.strptime(text, '%Y-%m-%d')
-    except ValueError:
-        return None
-
-
-def get_xmp_datetime(file_path):
-    """
-    Pull a date out of XMP metadata, if present -- the kind of thing
-    editors like Photoshop and Lightroom embed, separate from EXIF.
-
-    Tries xmp:CreateDate and photoshop:DateCreated first (treated as
-    equivalent -- both claim to represent creation), falling back to
-    xmp:ModifyDate only if neither is present. ModifyDate reflects a
-    LATER edit, not the original creation, so it's a meaningfully weaker
-    claim -- callers should treat it with much lower confidence (see
-    BASE_CONFIDENCE['xmp_modify_date']).
-
-    Uses a hand-rolled XML parser (xml.etree.ElementTree on the raw XMP
-    bytes), not Pillow's getxmp() convenience method -- getxmp() works in
-    testing, but its behavior isn't something this module wants to depend
-    on being consistent across Pillow versions (the same lesson learned
-    the hard way with Image.Exif() writing). It also flattens namespaces
-    into one dict, risking a silent collision between two different
-    namespaced fields that happen to share a local name -- staying with
-    explicit namespaces here avoids that.
-
-    Returns (date, source) where source is 'xmp_create_date' or
-    'xmp_modify_date', or (None, None) if no usable date was found.
-    """
-    try:
-        image = Image.open(file_path)
-        raw_xmp = image.info.get('xmp')
-    except Exception:
-        return None, None
-
-    if not raw_xmp:
-        return None, None
-
-    try:
-        xmp_text = raw_xmp.decode('utf-8') if isinstance(raw_xmp, bytes) else raw_xmp
-        root = ET.fromstring(xmp_text)
-    except ET.ParseError:
-        return None, None
-
-    ns = {
-        'xmp': 'http://ns.adobe.com/xap/1.0/',
-        'photoshop': 'http://ns.adobe.com/photoshop/1.0/',
-    }
-
-    for tag, source in [
-        ('xmp:CreateDate', 'xmp_create_date'),
-        ('photoshop:DateCreated', 'xmp_create_date'),
-        ('xmp:ModifyDate', 'xmp_modify_date'),
-    ]:
-        element = root.find(f'.//{tag}', ns)
-        if element is not None and element.text:
-            date = _parse_xmp_date_string(element.text.strip())
-            if date:
-                return date, source
-
-    return None, None
-
-
 def get_filesystem_creation_date(file_path):
     """File system creation date, used as a fallback and for cross-checking other signals."""
     try:
@@ -219,8 +98,14 @@ def describe_signal(signal):
 # Extensions treated as "JPEG-family" (EXIF/GPS/XMP signals) vs TIFF
 # (its own baseline DateTime tag). Add new types here as new evidence-
 # gathering functions are built for them.
-JPEG_LIKE_EXTENSIONS = {'.jpg', '.jpeg'}
+JPEG_LIKE_EXTENSIONS = {'.jpg', '.jpeg', '.thm'}
 TIFF_EXTENSIONS = {'.tif', '.tiff'}
+# Deliberately NOT adding '.raw' to TIFF_EXTENSIONS: while Adobe DNG really
+# is TIFF-based, manufacturer RAW formats (Canon CR2, Nikon NEF, Sony ARW)
+# are NOT, and ".raw" alone doesn't tell us which one a given file is. A
+# caller that knows it's dealing with DNG specifically should pass
+# file_type='.tiff' explicitly rather than this module guessing wrong for
+# every other RAW format.
 
 
 def gather_signals(file_path, readable_exif, file_type):
