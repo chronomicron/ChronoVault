@@ -2,13 +2,13 @@
 analyze_date.py
 
 Given evidence about a media file (its EXIF data and file path), work out
-the most likely date it was created, how confident we are in that date,
+the most likely date it was created, how confident it is in that date,
 and why.
 
 This module never moves, copies, or renames anything -- it only looks at
 evidence and reports back a scored, explainable conclusion. Any tool that
 needs a date decision (Importer today, possibly others later, e.g. an AI
-labeler following the same "hand me evidence, get back a scored answer"
+labeler following the same "hand it evidence, get back a scored answer"
 pattern) builds a small evidence bundle and calls analyze_date() with it.
 
 DESIGN NOTE -- built for more evidence than we currently have:
@@ -35,6 +35,7 @@ from datetime import datetime
 from PIL import Image
 
 from .image_tools.tiff_tools import get_tiff_datetime
+from .image_tools.exif_tools import get_photo_date_from_exif
 
 # No digital camera existed before this date, so any "date taken" earlier
 # than this is treated as implausible. (Also happens to be the author's
@@ -70,18 +71,6 @@ IMPLAUSIBLE_CONFIDENCE_CAP = 5
 # Below this confidence, date_uncertain is set True (kept for any code
 # that still wants a simple yes/no rather than reading the number).
 UNCERTAIN_THRESHOLD = 50
-
-
-def get_photo_date_from_exif(readable_exif):
-    """Pull DateTimeOriginal or DateTimeDigitized out of a readable EXIF dict."""
-    for tag_name in ('DateTimeOriginal', 'DateTimeDigitized'):
-        value = readable_exif.get(tag_name)
-        if value:
-            try:
-                return datetime.strptime(value, "%Y:%m:%d %H:%M:%S"), tag_name
-            except ValueError:
-                continue
-    return None, None
 
 
 def get_gps_datetime(readable_exif):
@@ -344,7 +333,7 @@ def analyze_date(evidence):
             'date_uncertain': True,
         }
 
-    # The strongest single signal becomes the date we actually use.
+    # The strongest single signal becomes the date actually used.
     primary = max(signals, key=lambda s: s['base_confidence'])
     others = [s for s in signals if s is not primary]
 
