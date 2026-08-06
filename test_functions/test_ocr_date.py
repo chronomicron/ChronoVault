@@ -2,30 +2,28 @@
 test_ocr_date.py
 
 A throwaway verification script -- not a permanent ChronoVault tool.
-Runs ocr_date.find_date_in_corners() against every image in
+Runs find_date_in_corners() (now in analyze_date/image_tools/ocr_tools.py,
+migrated from the old standalone ocr_date/ folder) against every image in
 OCR_test_images/, so real-world date-stamp accuracy can be checked
-against actual downloaded/scanned photos, not just synthetic test
-images generated in code.
+against actual downloaded/scanned photos.
 
 Usage (from the ChronoVault/ project root):
     python3 test_functions/test_ocr_date.py
 
-Requires tesseract-ocr installed as a system package (not just the
-pytesseract Python bindings) -- see ocr_date/README.md.
+Requires tesseract-ocr installed as a system package -- see
+analyze_date/image_tools/ocr_tools.py's module docstring for setup.
 """
 
 import sys
 from pathlib import Path
 
-# This script lives one folder down (test_functions/), so make the
-# project root importable regardless of where it's actually run from.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ocr_date.ocr_date import find_date_in_corners
+from analyze_date.image_tools.ocr_tools import find_date_in_corners
 
 IMAGE_FOLDER = "OCR_test_images"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
-DEBUG_CROP_FOLDER = "OCR_test_images/_debug_crops"  # what OCR actually saw, for every corner checked
+DEBUG_CROP_FOLDER = "OCR_test_images/_debug_crops"
 
 folder = Path(IMAGE_FOLDER)
 if not folder.exists():
@@ -57,12 +55,6 @@ for image_path in images:
     else:
         print(f"[NOTHING] {image_path.name}  -- no date pattern matched (or none met the confidence threshold)")
 
-    # Always show what OCR actually read -- and how confident it was -- for
-    # every corner/rotation/variant combo checked, whether or not a date
-    # was found. If any of it visibly looks like a date to a human but
-    # isn't listed above as [FOUND], check its confidence: a low number
-    # means it was deliberately rejected as too uncertain to trust, which
-    # is a MIN_OCR_CONFIDENCE tuning question, not a pattern bug.
     for entry in result["checked"]:
         text_display = entry["raw_text"] if entry["raw_text"] else "(no text detected)"
         print(f"            {entry['corner']:14s} rot={entry['rotation']:>3}  {entry['variant']:>4}  "
@@ -71,8 +63,3 @@ for image_path in images:
 
 print("-" * 60)
 print(f"Summary: {found_count}/{len(images)} image(s) had a date successfully detected.")
-if found_count < len(images):
-    print("For any marked [NOTHING] above, check the per-corner raw OCR text -- if any of it")
-    print("looks like a real date to you, that's a date_patterns gap in ocr_date.py to fix,")
-    print("not just an OCR misread.")
-    

@@ -35,6 +35,7 @@ from .image_tools.tiff_tools import get_tiff_datetime
 from .image_tools.exif_tools import get_photo_date_from_exif
 from .image_tools.gps_tools import get_gps_datetime
 from .image_tools.xmp_tools import get_xmp_datetime
+from .image_tools.ocr_tools import find_date_in_corners
 
 # No digital camera existed before this date, so any "date taken" earlier
 # than this is treated as implausible. (Also happens to be the author's
@@ -49,6 +50,7 @@ BASE_CONFIDENCE = {
     'exif_digitized': 85,
     'tiff_datetime': 90,     # TIFF's own baseline DateTime tag -- see get_tiff_datetime()
     'xmp_create_date': 80,   # xmp:CreateDate or photoshop:DateCreated -- see get_xmp_datetime()
+    'ocr_corner_stamp': 60,  # OCR-read corner date stamp -- opt-in only, see find_date_in_corners()
     'filesystem_fallback': 30,
     'xmp_modify_date': 20,   # reflects a LATER edit, not original creation -- weak fallback only
     # Future sources will get their own entries here, e.g.:
@@ -89,6 +91,7 @@ def describe_signal(signal):
         'exif_digitized': 'EXIF (DateTimeDigitized)',
         'tiff_datetime': 'TIFF DateTime tag',
         'xmp_create_date': 'XMP creation date',
+        'ocr_corner_stamp': 'OCR corner date stamp',
         'xmp_modify_date': 'XMP modify date',
         'filesystem_fallback': 'filesystem creation date',
     }
@@ -108,7 +111,7 @@ TIFF_EXTENSIONS = {'.tif', '.tiff'}
 # every other RAW format.
 
 
-def gather_signals(file_path, readable_exif, file_type):
+def gather_signals(file_path, readable_exif, file_type, try_ocr=False):
     """
     Collect every date signal we currently know how to read for a file --
     dispatched by file_type, since different file types carry evidence in
@@ -163,6 +166,19 @@ def gather_signals(file_path, readable_exif, file_type):
                 'base_confidence': BASE_CONFIDENCE['tiff_datetime'],
             })
 
+    # OCR is deliberately opt-in only -- slow (multiple corners x rotations
+    # x preprocessing variants), and only useful for files with weak or no
+    # other evidence. Never run unless explicitly requested via try_ocr,
+    # and only makes sense for actual images.
+    if try_ocr and (file_type in JPEG_LIKE_EXTENSIONS or file_type in TIFF_EXTENSIONS):
+        ocr_result = find_date_in_corners(file_path)
+        if ocr_result['date']:
+            signals.append({
+                'date': ocr_result['date'],
+                'source': 'ocr_corner_stamp',
+                'base_confidence': BASE_CONFIDENCE['ocr_corner_stamp'],
+            })
+
     fs_date = get_filesystem_creation_date(file_path)
     if fs_date:
         signals.append({
@@ -184,6 +200,7 @@ def analyze_date(evidence):
             'readable_exif': {...},         # EXIF tag dict, or {} if none -- only used for JPEG-family files
             'mismatch_threshold_days': 1,   # days of disagreement allowed before signals "disagree"
             'file_type': '.mp3',            # optional -- overrides extension-based type detection
+            'try_ocr': False,               # optional -- explicitly opt in to (slow) OCR corner-stamp scanning
         }
 
     'file_type', if given, determines which evidence-gathering functions
@@ -191,10 +208,14 @@ def analyze_date(evidence):
     the real type and it might not match the extension. If omitted, the
     type is inferred from the file's own extension.
 
+    'try_ocr' defaults to False -- OCR is slow and only useful for files
+    already known to have weak or no other evidence (e.g. items already
+    sitting in a review bucket). Never runs unless explicitly requested.
+
     Returns a dict:
         {
             'date_taken': datetime or None,
-            'date_source': 'exif_original' | 'exif_digitized' | 'tiff_datetime' | 'filesystem_fallback' | None,
+            'date_source': 'exif_original' | 'exif_digitized' | 'tiff_datetime' | 'ocr_corner_stamp' | 'filesystem_fallback' | None,
             'filesystem_creation_date': datetime or None,
             'confidence': int (0-100),
             'reason': str,               # short human-readable explanation
@@ -205,8 +226,9 @@ def analyze_date(evidence):
     readable_exif = evidence.get('readable_exif', {})
     mismatch_threshold_days = evidence.get('mismatch_threshold_days', 1)
     file_type = evidence.get('file_type') or Path(file_path).suffix.lower()
+    try_ocr = evidence.get('try_ocr', False)
 
-    signals, fs_date = gather_signals(file_path, readable_exif, file_type)
+    signals, fs_date = gather_signals(file_path, readable_exif, file_type, try_ocr)
 
     if not signals:
         return {
@@ -252,3 +274,4 @@ def analyze_date(evidence):
         'reason': reason,
         'date_uncertain': confidence < UNCERTAIN_THRESHOLD,
     }
+    
