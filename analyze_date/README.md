@@ -1,10 +1,29 @@
 # analyze_date
 
-`analyze_date` figures out the most likely date a media file was created, how confident it is in that date, and why. It's not a standalone tool you run from the terminal — it's a small package that other tools (currently just Importer) import and call.
+`analyze_date` figures out the most likely date a media file was created, how confident it is in that date, and why. It's not a standalone tool you run from the terminal — it's a small package that other tools (currently Importer, plus the `test_functions/` debugging scripts) import and call.
 
-## Why it's separate from Importer
+## Architecture
 
-Working out "when was this actually taken" turned out to be its own small, self-contained problem — worth its own module rather than living inline in Importer. The interface is deliberately generic: hand it whatever evidence you have about a file, get back a scored, explained answer. That shape isn't specific to dates — a future AI labeling tool (people, places, things in a photo) is expected to follow the same pattern: evidence in, a scored and explained conclusion out. Keeping `analyze_date` separate now means Importer never needs to know *how* the date was worked out, only what to do with the answer — the same way it won't need to know how a future labeler decided what's in a photo.
+`analyze_date.py` itself is now just the **orchestration layer** — it decides which evidence-gathering functions to call for a given file type, and combines whatever they find into one scored answer. The actual per-format extraction logic lives in `image_tools/`, one file per source:
+
+```
+analyze_date/
+├── analyze_date.py       -- orchestration: dispatch, scoring, combination. No format-specific code.
+├── image_tools/
+│   ├── exif_tools.py      -- EXIF DateTimeOriginal / DateTimeDigitized
+│   ├── gps_tools.py        -- EXIF GPSDateStamp / GPSTimeStamp
+│   ├── xmp_tools.py        -- XMP CreateDate / ModifyDate (Photoshop, Lightroom, etc.)
+│   ├── tiff_tools.py       -- TIFF's own baseline DateTime tag
+│   └── ocr_tools.py        -- OCR corner-stamp scanning (opt-in, see below)
+├── audio_tools/            -- empty placeholders, future MP3/ID3 work
+└── video_tools/            -- empty placeholders, future MP4 container-metadata work
+```
+
+This split happened after the module had grown to cover five different evidence sources in one file — each one now lives in its own testable, independently-reusable module, and `analyze_date.py` only needs to know *that* a source exists and how much to trust it, not *how* it works.
+
+## Why It's Separate From Importer
+
+The interface is deliberately generic: hand it whatever evidence you have about a file, get back a scored, explained answer. That shape isn't specific to dates — a future AI labeling tool (people, places, things in a photo) is expected to follow the same pattern: evidence in, a scored and explained conclusion out.
 
 ## Usage
 
@@ -13,8 +32,10 @@ from analyze_date.analyze_date import analyze_date
 
 result = analyze_date({
     'file_path': source,              # required
-    'readable_exif': readable_exif,   # dict of EXIF tags, or {} if none
+    'readable_exif': readable_exif,   # dict of EXIF tags, or {} if none -- only used for JPEG-family files
     'mismatch_threshold_days': 1,     # how many days apart before two signals "disagree"
+    'file_type': None,                # optional -- overrides extension-based type detection
+    'try_ocr': False,                 # optional -- opt in to (slow) OCR corner-stamp scanning
 })
 ```
 
@@ -23,7 +44,9 @@ Returns a dict:
 ```python
 {
     'date_taken': datetime or None,
-    'date_source': 'exif_original' | 'exif_digitized' | 'filesystem_fallback' | None,
+    'date_source': 'exif_gps' | 'exif_original' | 'exif_digitized' | 'tiff_datetime'
+                    | 'xmp_create_date' | 'xmp_modify_date' | 'ocr_corner_stamp'
+                    | 'filesystem_fallback' | None,
     'filesystem_creation_date': datetime or None,
     'confidence': int,      # 0-100
     'reason': str,          # short human-readable explanation
@@ -31,83 +54,78 @@ Returns a dict:
 }
 ```
 
+## File Type Dispatch
+
+Different file types carry date evidence in completely different places, so `gather_signals()` only calls the evidence-gathering functions relevant to the file's actual type:
+
+| `file_type` | Signals checked |
+|---|---|
+| `.jpg`, `.jpeg`, `.thm` | GPS, EXIF, XMP (+ OCR, if `try_ocr=True`) |
+| `.tif`, `.tiff` | TIFF's baseline DateTime tag (+ OCR, if `try_ocr=True`) |
+| anything else | filesystem date only, for now |
+
+`file_type` is inferred from the file's own extension unless explicitly overridden in the evidence dict — pass this when a caller already knows the real type and it might not match the extension (e.g. a DNG file, which is genuinely TIFF-structured, passed as `file_type='.tiff'`).
+
+`.thm` is included with the JPEG family deliberately: Canon-style sidecar thumbnail files are structurally JPEGs with their own EXIF, often mirroring the main video's date.
+
+**Not included:** `.raw` is deliberately *not* mapped to TIFF automatically. Adobe DNG really is TIFF-based, but Canon CR2 / Nikon NEF / Sony ARW are not, and the `.raw` extension alone doesn't tell you which one you have — guessing wrong here would be worse than not guessing. A caller that knows it's dealing with DNG specifically should pass the override explicitly.
+
 ## Strategy
 
-Every date `analyze_date` is given (from EXIF, from the filesystem, or from anything added later) is treated as one **signal** in a list, not as a special case. The logic doesn't hardcode "check EXIF, then check filesystem" — it collects however many signals are available and combines them the same way regardless of how many there are:
+Every date signal gathered for a file (from whichever `image_tools/` module found it) is treated as one entry in a list, not as a special case — the combination logic doesn't hardcode "check EXIF, then check GPS." It collects however many signals are available and combines them the same way regardless of how many there are:
 
-1. **Pick a primary signal.** The signal with the highest base confidence (see table below) becomes the date actually used.
-2. **Check the others for agreement.** Any other signal within `mismatch_threshold_days` of the primary is treated as confirming it; anything further off is treated as disagreeing.
+1. **Pick a primary signal.** The signal with the highest base confidence becomes the date actually used.
+2. **Check the others for agreement.** Any other signal within `mismatch_threshold_days` of the primary confirms it; anything further off disagrees.
 3. **Adjust the score.** Confidence starts at the primary signal's base score, then gets a bonus for each agreeing signal and a penalty for each disagreeing one.
-4. **Cap implausible dates.** If the resulting date is before cameras existed, or in the future, confidence is capped very low no matter what the signals said — agreement on an impossible date doesn't make it likely.
-
-This is why adding a new evidence source later (see below) doesn't require rewriting the scoring — it just means one more entry can show up in the signal list, and steps 1–4 already know what to do with it.
+4. **Cap implausible dates.** If the resulting date is before cameras existed, or in the future, confidence is capped very low no matter what the signals said.
 
 ## Confidence Thresholds
 
 **Base confidence, by signal source** (before any agreement/mismatch adjustment):
 
-| Source                | Base confidence |
-|------------------------|:---------------:|
-| `exif_original`         | 95               |
-| `exif_digitized`        | 85               |
-| `filesystem_fallback`   | 30               |
+| Source | Base confidence | Why |
+|---|:---:|---|
+| `exif_gps` | 98 | From the satellite signal at capture time, not the camera's own (sometimes wrong) clock |
+| `exif_original` | 95 | |
+| `tiff_datetime` | 90 | TIFF's own native timestamp field |
+| `exif_digitized` | 85 | |
+| `xmp_create_date` | 80 | `xmp:CreateDate` or `photoshop:DateCreated` |
+| `ocr_corner_stamp` | 60 | Already passed OCR's own internal confidence gate (see `ocr_tools.py`), but inherently less reliable than direct metadata |
+| `filesystem_fallback` | 30 | |
+| `xmp_modify_date` | 20 | Reflects a *later* edit, not original creation — a meaningfully weaker claim than CreateDate |
 
 **Adjustments:**
 
-| Situation                                              | Effect                          |
-|----------------------------------------------------------|----------------------------------|
-| Another signal agrees (within `mismatch_threshold_days`)  | **+5** per agreeing signal       |
-| Another signal disagrees                                   | **−25** per disagreeing signal   |
+| Situation | Effect |
+|---|---|
+| Another signal agrees (within `mismatch_threshold_days`) | **+5** per agreeing signal |
+| Another signal disagrees | **−25** per disagreeing signal |
 | Date is implausible (before 1972-07-26, or in the future) | capped at **5**, regardless of source or agreement |
-| No date evidence at all                                    | confidence **0**                 |
+| No date evidence at all | confidence **0** |
 
-Confidence is always clamped to the 0–100 range. Below **50**, `date_uncertain` is set `True` — this is the threshold Importer currently uses to decide whether a file goes into a normal `YYYY/MM/DD` folder or into `archive/_review_needed/` instead of a guessed placement.
+Confidence is always clamped to 0–100. Below **50**, `date_uncertain` is `True` — the threshold Importer uses to decide between a normal `YYYY/MM/DD` folder and `archive/_review_needed/`.
 
-**Worked examples:**
+## OCR Is Opt-In, Not Automatic
 
-| Scenario                                             | Confidence | Reason string (example)                                                         |
-|-------------------------------------------------------|:----------:|-----------------------------------------------------------------------------------|
-| EXIF `DateTimeOriginal`, filesystem date agrees        | 100        | `EXIF (DateTimeOriginal) -- confirmed by filesystem creation date`               |
-| EXIF `DateTimeOriginal` alone, nothing to compare against | 95      | `EXIF (DateTimeOriginal)`                                                         |
-| EXIF `DateTimeOriginal`, filesystem date disagrees       | 70        | `EXIF (DateTimeOriginal) -- disagrees with filesystem creation date`             |
-| No EXIF at all, filesystem date only                    | 30        | `filesystem creation date`                                                        |
-| Any date before 1972 or in the future                    | ≤5         | `... -- date is implausible (before cameras existed, or in the future)`          |
-| No evidence at all (no EXIF, file doesn't exist)          | 0          | `No date evidence available (no EXIF, no filesystem date)`                       |
+`try_ocr` defaults to `False`. OCR scanning is slow — multiple corners, multiple rotations, multiple preprocessing variants per file — and only useful for exactly the files that already have weak or no other evidence. It should be triggered deliberately (a person or a future GUI choosing "look for more clues" on a specific low-confidence file), never run automatically on every import. See `image_tools/ocr_tools.py` for the full design history, setup requirements, and known limitations (confirmed via real-world testing: Japanese/kanji stamps aren't supported yet, and dot-matrix CCTV-style fonts remain genuinely hard).
 
-## Design Note: This Is Meant to Work Beyond Photos
+## Adding a New Evidence Source
 
-The scoring engine in `analyze_date()` doesn't know or care what kind of file it's dating — it only ever combines a list of `{date, source, base_confidence}` signals, whatever their origin. Nothing in the primary-selection, agreement-bonus, mismatch-penalty, or implausibility logic assumes "this came from a photo." That's deliberate: the eventual goal is archiving more than just photos and video (e.g. MP3 recordings of meetings), and each new media type should only need its own evidence-gathering, not its own scoring logic.
+1. Write a new function in the relevant `*_tools.py` (or a new one, for a new media type), following the existing shape: take whatever raw input it needs, return `None` if nothing found.
+2. Add a `BASE_CONFIDENCE` entry for it in `analyze_date.py`.
+3. Add a branch to `gather_signals()`'s type dispatch that calls it and appends a signal, for whichever `file_type`(s) it applies to.
 
-What *is* currently photo-specific is `gather_signals()` — it unconditionally tries EXIF and GPS extraction, regardless of file type. For a non-image file, `readable_exif` just comes in empty, so it silently falls through to the filesystem date rather than using any type-specific evidence that might actually be sitting in the file.
+Nothing in `analyze_date()`'s actual combination logic needs to change — it already works for however many signals show up.
 
-Adding support for a new media type (MP3, for example — which carries its own ID3v2 date tags like `TDRC`, plus often a date in the filename, exactly like photos and EXIF) means:
+**Realistic future sources**, not yet implemented:
+- **Filename-derived dates** — cameras/phones often bake the date into the filename (e.g. `IMG_20260720_123957.jpg`).
+- **Camera sidecar files** — some cameras write per-shot metadata files beyond `.THM`.
+- **ID3 tags (MP3)** and **container metadata (MP4)** — `audio_tools/` and `video_tools/` exist as empty placeholders for exactly this; genuinely new work, not a migration.
 
-1. Write a new evidence-gathering function for that type (e.g. reading ID3 tags), following the same "look for a date, return `None` if not found" shape as `get_photo_date_from_exif()`.
-2. Add a base confidence entry to `BASE_CONFIDENCE` for the new source.
-3. Make `gather_signals()` (or its caller) type-aware — e.g. dispatch on file extension to call the right evidence-gathering functions for that type, instead of always trying the photo-specific ones.
+## Media Independence
 
-`analyze_date()` itself shouldn't need to change at all — it already just wants a list of signals, from wherever they came from.
-
-## Adding a New Evidence Source (Future Work)
-
-Realistic future sources, not yet implemented:
-
-- **Filename-derived dates** — many cameras and phones bake the date into the filename itself (e.g. `IMG_20260720_123957.jpg`). When EXIF is missing, this could be a much better signal than the filesystem date alone.
-- **Camera sidecar files** — some cameras (Canon SLRs, for instance) write a separate `.THM` file per shot with its own embedded metadata, independent of the main file's EXIF.
-- **XMP / IPTC metadata** — editors like Photoshop and Lightroom embed their own metadata (separate from EXIF), often including `CreateDate`/`ModifyDate` fields. A photo edited even once in one of these tools may carry this alongside, or instead of, usable EXIF.
-- **OCR corner-stamp detection** — a working proof-of-concept already exists in `ocr_date/` (see its README), for photos with a printed/imprinted date visible in a corner (old date-stamp cameras, scanned prints). Not yet wired in here, and deliberately meant to be an opt-in "look for more clues" step rather than run automatically — it's slow, and only useful for exactly the files that already have weak or no other evidence.
-
-Adding any of these just means:
-
-1. Add a base confidence entry to `BASE_CONFIDENCE` (there are commented-out placeholder entries already there for the first two).
-2. In `gather_signals()`, read the new source and, if a date was found, append one more entry to the `signals` list — same shape as the existing EXIF/filesystem entries.
-
-Nothing in `analyze_date()` itself needs to change — the primary-selection and agreement/mismatch logic already works for any number of signals. In particular, if EXIF, the filesystem date, *and* the filename all agree, that's automatically worth more (three agreement bonuses instead of one) without any special-case code for "three-way agreement."
-
-## Notes on the Filesystem Signal
-
-`get_filesystem_creation_date()` reads `st_ctime`. On Linux this is technically the inode's last metadata-change time, not a true creation time — there's no reliable, portable way to get real file creation time on Linux. It's used here as the best available proxy, same as before this module existed. Worth knowing if a filesystem-fallback date looks surprising (e.g. "creation" date is actually whenever the file was last copied or touched, not when it was first created).
+The scoring engine doesn't know or care what kind of file it's dating — only `gather_signals()`'s dispatch is type-aware. This is deliberate: the eventual goal is archiving more than just photos and video (e.g. MP3 recordings of meetings), and each new media type should only need its own evidence-gathering, not its own scoring logic.
 
 ## Design History
 
-This module didn't start with confidence scoring — the first version was a straight move of Importer's old EXIF-vs-filesystem logic into its own file, with the same binary `date_uncertain` flag it always had. Confidence scoring, the `reason` string, and the signals-list design (built to support future evidence sources without a rewrite) were added as a deliberate second step, once the plumbing was proven to work end-to-end.
+This module has gone through several deliberate stages: a plain move of Importer's old EXIF-vs-filesystem logic into its own file; confidence scoring and the signals-list design; GPS, XMP, and TIFF support added one at a time, each tested against real and synthetic data; OCR corner-stamp detection built and iterated on extensively against real downloaded photos; and finally, once the module had grown past a single reasonable file, the split into `image_tools/` seen here. Each stage was tested before the next began.
