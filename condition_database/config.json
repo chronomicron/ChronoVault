@@ -1,0 +1,6 @@
+{
+    "database_path": "located_files.db",
+    "output_report_path": "condition_report.json",
+    "mismatch_threshold_days": 1,
+    "try_ocr": false
+}
