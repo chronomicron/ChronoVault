@@ -107,4 +107,3 @@ def get_date_from_filename(file_path):
             return datetime(year, b, a)
 
     return None
-    
