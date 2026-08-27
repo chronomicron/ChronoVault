@@ -36,6 +36,8 @@ from .image_tools.exif_tools import get_photo_date_from_exif
 from .image_tools.gps_tools import get_gps_datetime
 from .image_tools.xmp_tools import get_xmp_datetime
 from .image_tools.ocr_tools import find_date_in_corners
+from .multi_tools.analyze_filename import get_date_from_filename
+from .multi_tools.analyze_folder import get_date_from_path
 
 # No digital camera existed before this date, so any "date taken" earlier
 # than this is treated as implausible. (Also happens to be the author's
@@ -50,11 +52,12 @@ BASE_CONFIDENCE = {
     'exif_digitized': 85,
     'tiff_datetime': 90,     # TIFF's own baseline DateTime tag -- see get_tiff_datetime()
     'xmp_create_date': 80,   # xmp:CreateDate or photoshop:DateCreated -- see get_xmp_datetime()
+    'filename_pattern': 70,  # date embedded in the filename itself -- see get_date_from_filename()
     'ocr_corner_stamp': 60,  # OCR-read corner date stamp -- opt-in only, see find_date_in_corners()
     'filesystem_fallback': 30,
+    'path_folder_pattern': 40,  # date embedded in a containing folder name -- see get_date_from_path()
     'xmp_modify_date': 20,   # reflects a LATER edit, not original creation -- weak fallback only
     # Future sources will get their own entries here, e.g.:
-    # 'filename_pattern': 70,
     # 'sidecar_thm': 90,
 }
 
@@ -91,9 +94,11 @@ def describe_signal(signal):
         'exif_digitized': 'EXIF (DateTimeDigitized)',
         'tiff_datetime': 'TIFF DateTime tag',
         'xmp_create_date': 'XMP creation date',
+        'filename_pattern': 'filename date pattern',
         'ocr_corner_stamp': 'OCR corner date stamp',
         'xmp_modify_date': 'XMP modify date',
         'filesystem_fallback': 'filesystem creation date',
+        'path_folder_pattern': 'folder path date pattern',
     }
     return labels.get(signal['source'], signal['source'])
 
@@ -178,6 +183,26 @@ def gather_signals(file_path, readable_exif, file_type, try_ocr=False):
                 'source': 'ocr_corner_stamp',
                 'base_confidence': BASE_CONFIDENCE['ocr_corner_stamp'],
             })
+
+    # Filename and folder-path patterns apply to ANY file type -- unlike
+    # every signal above, which is gated by file_type. A date embedded in
+    # a filename or folder name means the same thing whether the file is
+    # a photo, an MP3, or a PDF.
+    filename_date = get_date_from_filename(file_path)
+    if filename_date:
+        signals.append({
+            'date': filename_date,
+            'source': 'filename_pattern',
+            'base_confidence': BASE_CONFIDENCE['filename_pattern'],
+        })
+
+    path_date = get_date_from_path(file_path)
+    if path_date:
+        signals.append({
+            'date': path_date,
+            'source': 'path_folder_pattern',
+            'base_confidence': BASE_CONFIDENCE['path_folder_pattern'],
+        })
 
     fs_date = get_filesystem_creation_date(file_path)
     if fs_date:
@@ -274,4 +299,3 @@ def analyze_date(evidence):
         'reason': reason,
         'date_uncertain': confidence < UNCERTAIN_THRESHOLD,
     }
-    
