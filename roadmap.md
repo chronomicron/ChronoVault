@@ -56,8 +56,9 @@ A living map of the project: what's built, what's missing, and what's next — o
 | `chronovault.sh` — step-by-step menu (cleanup → generate → index → condition → import → audit → duplicates) | ✅ Done |
 | `chronovault.sh` self-contained test environment — everything lives in `chronovault_test/`, cleanup is a single safe folder delete, real archives at the project root are never at risk | ✅ Done |
 | `chronovault.sh` module-test menu options (test_env, test_retrieve_data, test_write_data, test_analyze_date, test_ocr_date) | ✅ Done |
-| `generate_test_data.py`: French-month-name folder scenario (e.g. `mars 2024`) to exercise `analyze_folder.py`'s planned French `MONTH_NAMES` support | ❌ Noted, not yet built |
-| `generate_test_data.py`: hidden-folder scenario (real matching files inside a `.`-prefixed folder) to actually verify Indexer's `rglob` walks into it | ❌ Noted, not yet built |
+| `generate_test_data.py`: hidden-folder scenario (2 dot-prefixed folders, one at the search root and one nested) | ✅ Done — confirmed directly: `Path.rglob('*')` does walk into dot-prefixed folders at both depths, so item #6 in the "next 10" list (roadmap use-case row 2) is no longer just an assumption once run through a real Indexer pass |
+| `generate_test_data.py`: European-style (day-first) filename-only date scenario, no EXIF | ✅ Done — confirmed directly against `analyze_filename.py`'s actual DMY logic, all four test cases parsed correctly as day-first |
+| `generate_test_data/README.md` documentation gap | ⚠️ Found and corrected: the README described TIFF/BMP/RAW-stub/THM scenarios and an `--other-format-samples` argument that don't exist anywhere in the actual code. README now matches the real script; whether those formats should actually be built is an open question, not resolved by the correction. |
 
 ## Documentation Debt
 

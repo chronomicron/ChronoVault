@@ -92,6 +92,18 @@ DUPLICATE_FOLDERS = [
     "Old_Backup_2/Trash_Copy_C",
 ]
 
+# Dot-prefixed (hidden, on Linux/macOS) folders, specifically to let
+# Indexer's rglob-based walk be VERIFIED against a genuine hidden-folder
+# case rather than just assumed to work (see roadmap.md). Two distinct
+# placements on purpose: one sitting directly under the search root, one
+# nested a level deep inside an otherwise-normal folder -- so this tests
+# both "a hidden folder right at the top" and "rglob actually recursing
+# past a normal folder into a hidden one," not just the easier of the two.
+HIDDEN_FOLDERS = [
+    ".hidden_root_backup",
+    "Old_Backup_2/.hidden_nested",
+]
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate fake test data for ChronoVault.")
@@ -114,6 +126,16 @@ def parse_args():
     parser.add_argument(
         "--metadata-samples", type=int, default=3,
         help="How many of each GPS/XMP category to generate (default: 3)"
+    )
+    parser.add_argument(
+        "--euro-date-samples", type=int, default=3,
+        help="How many filename-only files with unambiguous day-first (European-style) "
+             "dates to generate, no EXIF at all (default: 3)"
+    )
+    parser.add_argument(
+        "--hidden-samples", type=int, default=5,
+        help="How many files to place in EACH dot-prefixed hidden folder, "
+             "to verify Indexer actually finds them (default: 5)"
     )
     parser.add_argument(
         "--seed", type=int, default=None,
@@ -426,6 +448,47 @@ def main():
         lambda: {"xmp_modify_date": now - timedelta(days=random.randint(1, 60))}
     )
 
+    # European-style (day-first) filename dates -- deliberately NO EXIF,
+    # NO GPS, NO XMP at all, so filename_pattern is the only real signal
+    # (aside from the much-weaker filesystem fallback), and whatever date
+    # analyze_date resolves to can be attributed to the filename parser
+    # with confidence. Day is forced to 13-28 -- a month can never be
+    # 13-28, so this is UNAMBIGUOUSLY day-first, which actually exercises
+    # analyze_filename.py's day-first (DMY) branch, rather than the
+    # "both readings valid, default to US ordering" case that a random
+    # day 1-12 could fall into and wouldn't prove anything either way.
+    #
+    # Note: analyze_date's mismatch penalty (-25) will very likely apply
+    # here, since the filename's date and "now" (the filesystem date) are
+    # usually far apart -- expect these to often land below the
+    # uncertainty threshold and route to _review_needed/. That's a
+    # correct, expected outcome, not a bug: the point of this category is
+    # verifying the DATE ITSELF gets parsed correctly as day-first, not
+    # where it ends up filed.
+    euro_date_files = []
+    for i in range(1, args.euro_date_samples + 1):
+        day = random.randint(13, 28)
+        month = random.randint(1, 12)
+        year = random.randint(now.year - 5, now.year)
+        folder = random_subfolder(root)
+        filename = f"euro_{day:02d}-{month:02d}-{year}.jpg"
+        path = folder / filename
+        make_image(path)  # no exif/gps/xmp at all -- filename is the only real evidence
+        euro_date_files.append(path)
+    print(f"  {'euro_date':14s} {args.euro_date_samples:4d} file(s) -> e.g. {euro_date_files[0].relative_to(root)}")
+
+    # Hidden-folder scenario -- see HIDDEN_FOLDERS above for why there are
+    # two distinct placements rather than one.
+    hidden_files = []
+    for hidden_folder_name in HIDDEN_FOLDERS:
+        hidden_dir = root / hidden_folder_name
+        for i in range(1, args.hidden_samples + 1):
+            path = hidden_dir / f"hidden_{i:04d}.jpg"
+            make_image(path, exif_date=now - timedelta(minutes=random.randint(0, 30)))
+            hidden_files.append(path)
+    print(f"  {'hidden':14s} {len(hidden_files):4d} file(s) -> across {len(HIDDEN_FOLDERS)} "
+          f"dot-prefixed folder(s), e.g. {hidden_files[0].relative_to(root)}")
+
     # Duplicate set: take a few 'match' files and copy them (same filename,
     # identical bytes) into several backup-style folders, so Duplicate
     # Finder has real cross-folder duplicates to find.
@@ -449,7 +512,7 @@ def main():
     print(f"  {'junk video':14s} {args.junk_videos:4d} file(s) -> unreadable .mp4 placeholders")
 
     total = (n_match + n_mismatch + n_no_exif + n_implausible + dup_count + args.junk_videos
-             + n * 7)
+             + n * 7 + args.euro_date_samples + len(HIDDEN_FOLDERS) * args.hidden_samples)
     print("-" * 60)
     print(f"Total files generated: {total}")
     print()
@@ -466,6 +529,12 @@ def main():
     print(f"  xmp_only         -> source=xmp_create_date, confidence ~80, no EXIF at all")
     print(f"  xmp_modify_only  -> source=filesystem_fallback (outranks xmp_modify_date's low confidence),")
     print(f"                      low confidence overall, routed to _review_needed/")
+    print(f"  euro_date        -> source=filename_pattern, date_taken's DAY component should match the")
+    print(f"                      filename's first number (13-28) -- check this against test_analyze_date.py")
+    print(f"                      to confirm DMY disambiguation actually parsed it day-first, not month-first")
+    print(f"  hidden           -> confidence ~100 (same evidence as 'match'); should show up in")
+    print(f"                      located_files.db after Indexer runs -- if it doesn't, rglob is NOT")
+    print(f"                      recursing into dot-prefixed folders and Indexer needs a fix")
     print(f"  duplicates       -> should be found and grouped by Duplicate Finder")
     print(f"  junk video       -> no EXIF readable, behaves like a no_exif file "
           f"(excluded if require_exif=true)")
