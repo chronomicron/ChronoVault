@@ -14,7 +14,21 @@ invoked explicitly (directly, or eventually via the analyze_date CLI's
 "escalate to expensive tools only below a confidence threshold" logic),
 never run unconditionally on every file.
 
-Setup required (not optional):
+DEPENDENCY NOTE: cv2, numpy, and pytesseract are imported LAZILY, inside
+the specific functions that need them (_otsu_threshold, _ocr_with_
+confidence), not at module level. This was a real gap found in practice:
+"OCR is opt-in" was true for the FEATURE (never runs unless try_ocr=True
+is passed), but not for the DEPENDENCY -- module-level imports meant
+anyone using analyze_date at all needed these packages installed, even
+if they never touched OCR (this surfaced as a real ModuleNotFoundError
+on a machine without opencv installed, from nothing more than importing
+Importer). Lazy imports here make "opt-in" true at both levels: someone
+who never sets try_ocr=True doesn't need cv2/numpy/pytesseract installed
+at all. Verified directly: analyze_date imports and runs fine with these
+three packages genuinely unavailable, and only fails -- correctly -- at
+the moment try_ocr=True actually needs them.
+
+Setup required (only if you actually use try_ocr=True):
     sudo apt install tesseract-ocr
     apt install python3-pytesseract  (or: pip install pytesseract --break-system-packages)
     pip install opencv-python-headless --break-system-packages
@@ -28,11 +42,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-import cv2
-import numpy as np
 from PIL import Image
-import pytesseract
-from pytesseract import Output
 
 # Date stamps sit in a thin band along an edge, not a deep square region --
 # real-world testing showed a wide-but-short crop finds them far more
@@ -155,7 +165,13 @@ def _ocr_with_confidence(image):
     guess. Words Tesseract didn't attach a real confidence to (conf == -1,
     its convention for "not applicable") are excluded from the average
     rather than counted as zero.
+
+    pytesseract is imported here, lazily, rather than at module level --
+    see this file's module docstring for why.
     """
+    import pytesseract
+    from pytesseract import Output
+
     data = pytesseract.image_to_data(image, config=TESSERACT_CONFIG, output_type=Output.DICT)
     words = []
     confidences = []
@@ -182,7 +198,13 @@ def _otsu_threshold(pil_image):
     just the text (see CORNER_HEIGHT_FRACTION) -- Otsu on a crop with a lot
     of unrelated content picks a threshold dominated by that content
     instead of the tiny text.
+
+    cv2 and numpy are imported here, lazily, rather than at module level --
+    see this file's module docstring for why.
     """
+    import cv2
+    import numpy as np
+
     arr = np.array(pil_image)
     _, binarized = cv2.threshold(arr, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     return Image.fromarray(binarized)
@@ -268,4 +290,3 @@ def find_date_in_corners(file_path, debug_dir=None):
 
     return {"date": None, "corner": None, "rotation": None, "variant": None,
             "raw_text": None, "ocr_confidence": None, "checked": checked}
-            

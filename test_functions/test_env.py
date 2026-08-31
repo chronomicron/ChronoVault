@@ -50,55 +50,66 @@ check("Python", v >= (3, 8), f"{v.major}.{v.minor}.{v.micro}", required=True)
 # worth catching on a new machine) ---
 check("SQLite", True, sqlite3.sqlite_version, required=True)
 
-# --- Pillow -- used by every tool that reads or writes image files ---
+# --- Pillow -- used by every tool that reads or writes image files. Genuinely
+# required regardless of which features are used -- unlike the OCR-only
+# dependencies below, there's no code path in ChronoVault that avoids Pillow. ---
 try:
     import PIL
     check("Pillow", True, PIL.__version__, required=True)
 except ImportError:
     check("Pillow", False, "not installed -- pip install Pillow --break-system-packages", required=True)
 
-# --- NumPy -- used by ocr_date's Otsu thresholding preprocessing ---
+# --- OCR-only dependencies: NumPy, OpenCV, Tesseract, pytesseract ---
+# All four are marked OPTIONAL here, not required. They're only ever imported
+# lazily, inside analyze_date/image_tools/ocr_tools.py's OCR-scanning functions
+# themselves -- not at module level -- specifically so that using analyze_date
+# at all (the normal case) never needs these installed. They only matter if
+# you pass try_ocr=True somewhere. This used to NOT be true: an earlier version
+# imported cv2/numpy/pytesseract at module level in ocr_tools.py, which meant
+# anyone using Importer or Condition Database at all needed these installed,
+# even without ever touching OCR -- surfaced as a real ModuleNotFoundError on
+# a machine missing opencv, from nothing more than importing Importer. Fixed
+# by moving those imports inside the specific functions that use them; these
+# checks were updated to match that reality rather than the old assumption.
 try:
     import numpy
-    check("NumPy", True, numpy.__version__, required=True)
+    check("NumPy", True, numpy.__version__, required=False)
 except ImportError:
-    check("NumPy", False, "not installed -- needed by ocr_date's OpenCV preprocessing", required=True)
+    check("NumPy", False, "not installed -- only needed if you use try_ocr=True", required=False)
 
-# --- OpenCV -- used by ocr_date for Otsu thresholding ---
 try:
     import cv2
-    check("OpenCV", True, cv2.__version__, required=True)
+    check("OpenCV", True, cv2.__version__, required=False)
 except ImportError:
     check("OpenCV", False,
-          "not installed -- pip install opencv-python-headless --break-system-packages (required for ocr_date)",
-          required=True)
+          "not installed -- pip install opencv-python-headless --break-system-packages (only needed for try_ocr=True)",
+          required=False)
 
-# --- Tesseract OCR engine (system binary, separate from the Python bindings) ---
 tesseract_path = shutil.which("tesseract")
 if tesseract_path:
     ok, output = run_command(["tesseract", "--version"])
     version_line = output.splitlines()[0] if output else "version unknown"
-    check("Tesseract executable", True, version_line, required=True)
+    check("Tesseract executable", True, version_line, required=False)
 else:
     check("Tesseract executable", False,
-          "not found -- sudo apt install tesseract-ocr (required for ocr_date)", required=True)
+          "not found -- sudo apt install tesseract-ocr (only needed for try_ocr=True)", required=False)
 
-# --- pytesseract -- Python bindings for Tesseract ---
 try:
     import pytesseract
     version = getattr(pytesseract, "__version__", "installed")
-    check("pytesseract", True, version, required=True)
+    check("pytesseract", True, version, required=False)
 except ImportError:
     check("pytesseract", False,
-          "not installed -- apt install python3-pytesseract, or pip install pytesseract --break-system-packages",
-          required=True)
+          "not installed -- apt install python3-pytesseract, or pip install pytesseract --break-system-packages "
+          "(only needed for try_ocr=True)",
+          required=False)
 
 # --- OCR language packs (only meaningful if Tesseract itself is present) ---
 if tesseract_path:
     ok, output = run_command(["tesseract", "--list-langs"])
     langs = [line.strip() for line in output.splitlines()[1:] if line.strip()]
     check("Tesseract language: eng", "eng" in langs,
-          "" if "eng" in langs else "missing -- needed for all current OCR", required=True)
+          "" if "eng" in langs else "missing -- needed for OCR if you use try_ocr=True", required=False)
     check("Tesseract language: jpn", "jpn" in langs,
           "" if "jpn" in langs else "not installed -- only needed for future Japanese date-stamp support",
           required=False)

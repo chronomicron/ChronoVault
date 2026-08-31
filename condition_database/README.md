@@ -33,11 +33,23 @@ python3 condition_database/condition_database.py condition_database/config.json
 
 ## New `located_files.db` Columns
 
-Added automatically via the same `ALTER TABLE`-if-missing pattern used everywhere else in the project: `confidence`, `date_reason`, `date_source`, `date_taken`. `file_hash` already existed there (added earlier by Duplicate Finder's source mode).
+Added automatically via the same `ALTER TABLE`-if-missing pattern used everywhere else in the project: `confidence`, `date_reason`, `date_source`, `date_taken`, and `file_hash`.
+
+`file_hash` is ensured here directly, the same way as the others — it does **not** depend on Duplicate Finder having run first (see "Bug Fixed" below for why that distinction matters).
 
 ## Idempotency
 
 Safe to re-run. `confidence IS NULL` is what marks a file as not-yet-conditioned — once a file has been processed, re-running the tool skips it automatically, without needing a separate flag column. Confirmed directly: a second run against an already-conditioned database finds nothing left to do.
+
+## Bug Fixed
+
+Worth keeping on record, same spirit as `audit_archive/README.md`'s own bug log — this one was real and would hit anyone running the tools in their documented order:
+
+**`file_hash` column was read and written throughout this script, but never `ensure_column`'d.** The original assumption — noted in an earlier version of this README — was that `file_hash` would already exist by the time Condition Database runs, "added earlier by Duplicate Finder's source mode." That assumption doesn't hold: in the documented pipeline order (Indexer → Condition Database → Importer → Audit Archive → Duplicate Finder), Duplicate Finder runs *last*. So the very first time Condition Database runs — right after Indexer, exactly as intended — the column has never been created.
+
+What actually happened without the fix: every per-file `row['file_hash']` access was wrapped in a broad `try/except`, so each file silently failed there (printed as `FAILED: ...`, easy to miss in a long run). The final duplicate-detection query, which references `file_hash` directly in raw SQL *outside* that `try/except`, then crashed outright with `sqlite3.OperationalError: no such column: file_hash` — this is the point where it was actually caught, via a real end-to-end run (generate test data → Indexer → Condition Database) rather than by reading the code.
+
+Fixed by adding `ensure_column(conn, 'located_files', 'file_hash', 'TEXT')` alongside the other four `ensure_column` calls, so it's created on first use regardless of what's run before it.
 
 ## Known Limitation
 

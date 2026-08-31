@@ -140,6 +140,21 @@ def main():
     ensure_column(conn, 'located_files', 'date_reason', 'TEXT')
     ensure_column(conn, 'located_files', 'date_source', 'TEXT')
     ensure_column(conn, 'located_files', 'date_taken', 'TEXT')
+    # BUG FIX: file_hash was never ensured here previously. The old
+    # assumption -- "file_hash already exists, added earlier by Duplicate
+    # Finder's source mode" -- doesn't hold in the documented pipeline
+    # order (Indexer -> Condition Database -> Importer -> Audit ->
+    # Duplicate Finder). Duplicate Finder runs LAST, so the very first
+    # time this tool runs right after Indexer, the column has never been
+    # created. Without this line, every per-file row['file_hash'] access
+    # below raised IndexError (silently swallowed by the broad try/except
+    # around it, printed as "FAILED" for every single file), and the
+    # final duplicate-check query -- which references file_hash directly
+    # in raw SQL, outside that try/except -- crashed outright with
+    # "sqlite3.OperationalError: no such column: file_hash". Confirmed
+    # directly: a fresh located_files.db right after Indexer genuinely
+    # has no file_hash column at all.
+    ensure_column(conn, 'located_files', 'file_hash', 'TEXT')
 
     # Only files not yet conditioned -- confidence IS NULL is the marker,
     # giving natural idempotency without needing a separate flag column.
