@@ -54,6 +54,10 @@ A living map of the project: what's built, what's missing, and what's next — o
 | `generate_test_data.py` — 16 scenario categories across JPEG/TIFF/BMP/RAW-approx/THM | ✅ Done |
 | `test_functions/` — env check, retrieve/write/OCR/analyze_date debugging scripts | ✅ Done |
 | `chronovault.sh` — step-by-step menu (cleanup → generate → index → condition → import → audit → duplicates) | ✅ Done |
+| `chronovault.sh` self-contained test environment — everything lives in `chronovault_test/`, cleanup is a single safe folder delete, real archives at the project root are never at risk | ✅ Done |
+| `chronovault.sh` module-test menu options (test_env, test_retrieve_data, test_write_data, test_analyze_date, test_ocr_date) | ✅ Done |
+| `generate_test_data.py`: French-month-name folder scenario (e.g. `mars 2024`) to exercise `analyze_folder.py`'s planned French `MONTH_NAMES` support | ❌ Noted, not yet built |
+| `generate_test_data.py`: hidden-folder scenario (real matching files inside a `.`-prefixed folder) to actually verify Indexer's `rglob` walks into it | ❌ Noted, not yet built |
 
 ## Documentation Debt
 

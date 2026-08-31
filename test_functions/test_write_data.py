@@ -6,7 +6,8 @@ Confirms apply_date_correction() works end to end by comparing a fresh
 Audit Archive report taken immediately before applying corrections
 against one taken immediately after.
 
-Usage (from the ChronoVault/ project root):
+Usage (from the ChronoVault/ project root, or from anywhere via
+chronovault.sh's containment cd trick -- see below):
     python3 test_functions/test_write_data.py
 """
 
@@ -18,15 +19,32 @@ from datetime import datetime, timedelta
 
 # This script lives one folder down (test_functions/), so make the
 # project root importable regardless of where it's actually run from.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from retrieve_data.retrieve_data import list_review_items
 from write_data.write_data import apply_date_correction
 
+# ARCHIVE_ROOT and AUDIT_RESULT_PATH are deliberately relative to the
+# CURRENT WORKING DIRECTORY -- they describe wherever the archive/report
+# being tested actually lives (the project root for a real archive, or
+# chronovault_test/ when run via chronovault.sh), matching the same
+# CWD-relative convention every other ChronoVault tool already follows.
 ARCHIVE_ROOT = "archive"
-AUDIT_SCRIPT = "audit_archive/audit_archive.py"
-AUDIT_CONFIG = "audit_archive/config.json"
 AUDIT_RESULT_PATH = Path("audit_result.json")
+
+# AUDIT_SCRIPT and AUDIT_CONFIG are different: they point at the Audit
+# Archive TOOL ITSELF, which always lives in the same place relative to
+# this script (audit_archive/, next to test_functions/) regardless of
+# what directory this script happens to be run from. Resolving these
+# against PROJECT_ROOT rather than a bare relative string is what lets
+# this script work correctly when invoked with a different working
+# directory -- e.g. chronovault.sh cd-ing into chronovault_test/ before
+# calling it, so all the ARCHIVE_ROOT/AUDIT_RESULT_PATH outputs above
+# land in the contained test folder instead of the project root.
+AUDIT_SCRIPT = str(PROJECT_ROOT / "audit_archive" / "audit_archive.py")
+AUDIT_CONFIG = str(PROJECT_ROOT / "audit_archive" / "config.json")
+
 MAX_CORRECTIONS = 3  # keep the test run quick, and leave some review items behind for further manual testing
 
 
@@ -52,7 +70,7 @@ def print_summary(label, report):
 print(f"Checking for an existing Audit report at '{AUDIT_RESULT_PATH}'...")
 if not AUDIT_RESULT_PATH.exists():
     print(f"No '{AUDIT_RESULT_PATH}' found. Run Audit Archive first "
-          f"(./chronovault.sh option [3], or `python3 {AUDIT_SCRIPT} {AUDIT_CONFIG}`), "
+          f"(chronovault.sh option [6], or `python3 {AUDIT_SCRIPT} {AUDIT_CONFIG}`), "
           f"then re-run this script.")
     sys.exit(1)
 print("Found it. Running Audit Archive fresh now to capture an accurate 'before' snapshot...")
@@ -99,12 +117,8 @@ if not any_diff:
 
 if after['summary']['misplaced_count'] > before['summary']['misplaced_count']:
     print()
-    print("Note: 'misplaced_count' going up here is expected with the current design, not a")
-    print("bug in this test. apply_date_correction() deliberately leaves 'date_taken' untouched")
-    print("to preserve the original algorithmic evidence, but Audit Archive's placement check")
-    print("only ever compares a file's location against 'date_taken' -- it doesn't know")
-    print("'user_corrected_date' exists yet. So a real correction (one that actually differs")
-    print("from the original guess) will currently get flagged as misplaced, even though a")
-    print("person deliberately put it there. Worth deciding whether Audit Archive should be")
-    print("updated to prefer 'user_corrected_date' over 'date_taken' when present.")
+    print("Note: 'misplaced_count' went up. Audit Archive's placement check already prefers")
+    print("'user_corrected_date' over 'date_taken' when present (see audit_archive.py), so this")
+    print("would now genuinely indicate a real problem -- worth investigating rather than")
+    print("assuming it's expected, unlike in an earlier version of this project.")
     
