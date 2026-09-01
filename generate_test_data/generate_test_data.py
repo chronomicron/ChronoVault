@@ -140,6 +140,12 @@ def parse_args():
              "to verify Indexer actually finds them (default: 5)"
     )
     parser.add_argument(
+        "--french-month-samples", type=int, default=3,
+        help="How many filename-only files (no EXIF) to place inside a French "
+             "month-name folder (e.g. 'février 2022'), to verify analyze_folder.py's "
+             "French MONTH_NAMES support (default: 3)"
+    )
+    parser.add_argument(
         "--seed", type=int, default=None,
         help="Random seed for a reproducible run (default: random each time)"
     )
@@ -530,6 +536,23 @@ def main():
     print(f"  {'hidden':14s} {len(hidden_files):4d} file(s) -> across {len(HIDDEN_FOLDERS)} "
           f"dot-prefixed folder(s), e.g. {hidden_files[0].relative_to(root)}")
 
+    # French month-name folder scenario -- deliberately NO EXIF at all, so
+    # the folder path is the ONLY real signal (aside from the much-weaker
+    # filesystem fallback), and whatever date analyze_date resolves to can
+    # be attributed to analyze_folder.py's French MONTH_NAMES support
+    # specifically. Placed inside an existing-style backup folder rather
+    # than at the search root, to look like a realistic import location
+    # (an old drive genuinely organized under a French-language OS would
+    # put a folder like this a level or two deep, not at the top).
+    french_month_dir = root / "Old_Backup_1" / "février 2022"
+    french_month_files = []
+    for i in range(1, args.french_month_samples + 1):
+        path = french_month_dir / f"french_{i:04d}.jpg"
+        make_image(path)  # no exif/gps/xmp at all -- the folder name is the only real evidence
+        french_month_files.append(path)
+    print(f"  {'french_month':14s} {args.french_month_samples:4d} file(s) -> "
+          f"{french_month_dir.relative_to(root)}/")
+
     # Real ZIP and TAR.GZ archives, built from already-generated 'match'
     # files -- gives Indexer's archive detection and opt-in content-listing
     # feature something genuine to open, not just a placeholder extension.
@@ -560,7 +583,8 @@ def main():
     print(f"  {'junk video':14s} {args.junk_videos:4d} file(s) -> unreadable .mp4 placeholders")
 
     total = (n_match + n_mismatch + n_no_exif + n_implausible + dup_count + args.junk_videos
-             + n * 7 + args.euro_date_samples + len(HIDDEN_FOLDERS) * args.hidden_samples + 2)
+             + n * 7 + args.euro_date_samples + len(HIDDEN_FOLDERS) * args.hidden_samples
+             + args.french_month_samples + 2)
     print("-" * 60)
     print(f"Total files generated: {total}")
     print()
@@ -583,6 +607,11 @@ def main():
     print(f"  hidden           -> confidence ~100 (same evidence as 'match'); should show up in")
     print(f"                      located_files.db after Indexer runs -- if it doesn't, rglob is NOT")
     print(f"                      recursing into dot-prefixed folders and Indexer needs a fix")
+    print(f"  french_month     -> source=path_folder_pattern, base confidence 40, likely reduced by the")
+    print(f"                      mismatch penalty against filesystem 'now' (same caveat as euro_date --")
+    print(f"                      often lands well below 40, sometimes in _review_needed/). What matters")
+    print(f"                      here is date_taken's MONTH being February, confirming analyze_folder.py's")
+    print(f"                      French MONTH_NAMES actually matched the accented folder name")
     print(f"  archives         -> Indexer should detect both under Archives/ regardless of")
     print(f"                      look_inside_archives; with it set true, their real jpg contents")
     print(f"                      ({zip_file_count} in the zip, {tar_file_count} in the tar.gz) should be listed")

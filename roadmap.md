@@ -71,11 +71,11 @@ A living map of the project: what's built, what's missing, and what's next — o
 
 ## New Since Last Roadmap Pass
 
-### Multi-language support (French + Japanese) — newly raised, not yet built
+### Multi-language support (French + Japanese) — French month names DONE, rest not yet built
 
-This touches several different places, worth scoping separately rather than as one task:
+This touches several different places, scoped separately rather than as one task:
 
-- **`analyze_folder.py`'s month names** — currently English-only (`MONTH_NAMES` dict). Adding French (`mars`, `janvier`...) is small and mechanical. Japanese folder naming by month name is a much rarer real-world pattern (Japanese dates are usually numeric, `2024年3月`), so lower priority.
+- **`analyze_folder.py`'s month names — ✅ Done.** French entries (`janvier`, `février`/`fevrier`, `mars`, ... both accented and unaccented spellings for every name that carries an accent) added to `MONTH_NAMES`. This surfaced a real bug in the process, not just a data gap: the `month_name_year` regex matched `[A-Za-z]+` only, so an accented name like `février` could never match at all — it would silently fall through to "no date found" rather than erroring, exactly the quiet-failure mode this project works to avoid. Fixed by matching `[^\W\d_]+` instead (any language's letters), which also means a third language's month names later needs only dictionary entries, no further regex change. Verified directly: 15 test cases (English regression + French accented/unaccented + negative cases like a bare `1080` folder) all pass, and confirmed end-to-end through the real `analyze_date()` call against genuine files sitting in an actual accented folder (`Old_Backup_1/février 2022/`) — not just the isolated function. `generate_test_data.py` now has a dedicated `french_month` scenario exercising this for real. Japanese folder naming by month name was considered and deprioritized — Japanese dates are typically numeric (`2024年3月`), so the existing year/year-month patterns already cover it reasonably without new month-name entries.
 - **OCR + French** — mostly already works. French date stamps are typically `DD/MM/YYYY`, and the DMY disambiguation logic already built for `ocr_tools.py` and `analyze_filename.py` already handles this ordering. No new work needed, just worth testing against a real French-stamped photo to confirm.
 - **OCR + Japanese** — still needs the `tesseract-ocr-jpn` language pack and kanji-aware parsing patterns, as already documented in `ocr_tools.py`'s known limitations. Unchanged status: real, scoped, not started.
 - **GUI localization (en/fr/jp)** — no GUI exists yet, so this is really a *requirement on the GUI's architecture* from day one: build it with a strings/translation-table pattern from the start rather than hardcoded English text, so language support doesn't mean retrofitting later. Worth deciding as part of GUI v0.1's design, even if only English ships first.
