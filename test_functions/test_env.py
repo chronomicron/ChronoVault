@@ -129,6 +129,21 @@ check("exiftool", exiftool_path is not None,
       "not currently used -- Pillow handles all EXIF reading today" if not exiftool_path else "",
       required=False)
 
+# --- pycdlib -- only needed for Indexer's optional ISO content-listing feature
+# (look_inside_archives=true in indexer/config.json). ZIP and TAR listing use
+# Python's standard library (zipfile/tarfile) and need nothing extra. Without
+# pycdlib, ISO files are still detected and their locations recorded -- only
+# the "look inside" part is skipped, with a clear note explaining why. ---
+try:
+    import pycdlib
+    version = getattr(pycdlib, "__version__", "installed")
+    check("pycdlib", True, version, required=False)
+except ImportError:
+    check("pycdlib", False,
+          "not installed -- pip install pycdlib --break-system-packages "
+          "(only needed for Indexer's look_inside_archives=true on ISO files)",
+          required=False)
+
 # --- Write permission on the project root ---
 check(f"Write permission ({PROJECT_ROOT})", os.access(PROJECT_ROOT, os.W_OK), required=True)
 

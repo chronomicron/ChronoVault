@@ -19,7 +19,7 @@ Created and maintained by **Indexer**. This database is the raw inventory of eve
 | `creation_date`     | TEXT    | File system creation timestamp.                                      |
 | `modification_date` | TEXT    | File system last-modified timestamp.                                 |
 | `status`            | TEXT    | Pipeline status. See below.                                          |
-| `file_hash`         | TEXT    | SHA-256 hash of the file's contents. `NULL` until Duplicate Finder runs in `source` mode against this file — it isn't computed by Indexer. |
+| `file_hash`         | TEXT    | SHA-256 hash of the file's contents. `NULL` until Condition Database or Duplicate Finder runs against this file — it isn't computed by Indexer. |
 
 **Status values:**
 
@@ -28,8 +28,32 @@ Created and maintained by **Indexer**. This database is the raw inventory of eve
 | `located`  | Found by Indexer, not yet processed by Importer.                          |
 | `imported` | Successfully copied into the archive by Importer. Permanently done — never re-processed. |
 | `excluded` | Did not pass one of Importer's filters (size, EXIF requirement, excluded path, thumbnail). **Re-evaluated on every Importer run**, since filters can change — not a permanent state. |
+| `duplicate`| Marked by Condition Database as a repeat of another file already staying `located` — same hash, different path. Skipped from import, but never deleted. |
 
-**Built by:** Indexer, incrementally, across one or more runs against different source locations. Rows are never deleted by the normal pipeline; only their `status` changes over time as Importer processes them. `file_hash` is added later, and only, by Duplicate Finder (`source` mode) — via `ALTER TABLE` the first time it runs, so this column exists even on older databases created before hashing was added.
+**Built by:** Indexer, incrementally, across one or more runs against different source locations. Rows are never deleted by the normal pipeline; only their `status` changes over time as Importer processes them. `file_hash` is added later, and only, by Condition Database or Duplicate Finder (`source` mode) — via `ALTER TABLE` the first time either runs, so this column exists even on older databases created before hashing was added.
+
+---
+
+# 1b. Located Archives Table (`located_archives`, inside `located_files.db`)
+
+Also created and maintained by **Indexer**, alongside `located_files`, in the same database. Tracks compressed/disc-image files (ZIP, TAR, ISO) found during a scan — kept in a separate table, and deliberately named differently from `archive_files` (below), since "an archive Indexer found on a source drive" and "a file already copied into the ChronoVault archive" are genuinely different things that happen to share the word "archive."
+
+**Table: `located_archives`**
+
+| Column                 | Type    | Description |
+|-------------------------|---------|--------------|
+| `id`                    | INTEGER | Auto-incrementing primary key. |
+| `archive_path`          | TEXT    | Full path to the archive. Unique. |
+| `archive_type`          | TEXT    | `zip`, `tar`, `targz`, `iso`, or `unknown` (an archive extension with no built-in content lister). |
+| `archive_size`          | INTEGER | Archive file size in bytes. |
+| `contents_listed`       | INTEGER | `1` if contents were successfully listed at some point, `0` if never attempted or attempted-and-failed. |
+| `matching_file_count`   | INTEGER | How many members inside matched the configured media `extensions`. `NULL` if never listed. |
+| `matching_files`        | TEXT    | JSON list of matching member names/paths inside the archive (capped at 500). `NULL` if never listed. |
+| `note`                  | TEXT    | Explains a partial or failed listing attempt (missing `pycdlib`, truncated list, or the underlying error for a corrupt archive). `NULL` otherwise. |
+
+**Built by:** Indexer. Every detected archive's *location* is recorded unconditionally, regardless of config. Whether its *contents* also get listed (via `zipfile`/`tarfile`/`pycdlib`, no extraction) is controlled by `look_inside_archives` in `indexer/config.json`. Turning that flag on in a later run backfills content-listing for archives already on record from an earlier run — Indexer never needs a full rescan just because the flag changed, and never re-lists an archive whose contents were already successfully read. See `indexer/README.md` for the full behavior.
+
+**Not yet built:** anything that actually *acts* on `matching_files` — extracting those specific members so they can be reviewed and imported. Listing is read-only, same as everything else Indexer does; extraction is tracked as future work in `roadmap.md`.
 
 ---
 
@@ -40,7 +64,7 @@ Created and maintained by **Importer**, and lives *inside* the archive folder it
 **Table: `archive_files`**
 
 | Column                     | Type    | Description                                                              |
-|----------------------------|---------|------------------------------------------------------------------------------|
+|----------------------------|---------|--------------------------------------------------------------------------|
 | `id`                       | INTEGER | Auto-incrementing primary key.                                               |
 | `archive_path`             | TEXT    | Final path of the file inside the archive. Unique. Either a `YYYY/MM/DD/` date folder, or `_review_needed/` for low-confidence files. |
 | `source_path`              | TEXT    | Original path the file was copied from (for traceability/auditing).         |
@@ -77,7 +101,7 @@ Once an AI labeling agent (or manual tagging) is introduced, archived media will
 **Proposed table: `labels`**
 
 | Column        | Type    | Description                                                    |
-|---------------|---------|--------------------------------------------------------------------|
+|---------------|---------|----------------------------------------------------------------|
 | `id`          | INTEGER | Auto-incrementing primary key.                                     |
 | `label_name`  | TEXT    | The label itself, e.g. `"uncle Andre"`, `"Japan"`, `"beach"`. Unique. |
 | `category`    | TEXT    | Optional grouping — e.g. `person`, `place`, `thing`.                |
@@ -100,3 +124,9 @@ This design means:
 A future AI labeler is expected to follow the same "hand it evidence, get back a scored answer" shape as `analyze_date` — so however many labels or confidence scores it produces per file, they'd land in these two tables without needing `archive_files` itself to change.
 
 This section is a design placeholder — these tables are not created by any current tool. They'll be implemented when the AI labeling phase of the project begins.
+
+---
+
+# 4. Future Schema — Candidate Review (Designed, Not Yet Implemented)
+
+A `candidate` status for `located_files.status`, plus a `candidate_decision` column (`pending`/`approved`/`rejected`), to support review workflows for files a person needs to explicitly say yes/no to before import — e.g. files found via archive-content listing (see `located_archives` above) once extraction is built, or images too ambiguous for automatic photo-vs-graphic discrimination. Rejection is a separate flag from `status`, not a status change to `excluded`, specifically so a rejected candidate can be revisited later without redoing whatever work produced it in the first place. See `roadmap.md` for the full design rationale.

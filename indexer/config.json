@@ -8,5 +8,13 @@
         "raw",
         "cr2",
         "arw"
-    ]
+    ],
+    "archive_extensions": [
+        "zip",
+        "tar",
+        "tar.gz",
+        "tgz",
+        "iso"
+    ],
+    "look_inside_archives": false
 }
