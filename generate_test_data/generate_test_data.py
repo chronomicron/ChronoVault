@@ -48,6 +48,8 @@ import argparse
 import random
 import struct
 import sys
+import tarfile
+import zipfile
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -329,6 +331,45 @@ def make_junk_video(path):
         f.write(random.randbytes(200))
 
 
+def make_archives(root, match_files):
+    """
+    Build one real ZIP and one real TAR.GZ, each containing a handful of
+    already-generated 'match' files -- reusing content rather than
+    generating anything new specifically for this. Gives Indexer's
+    archive detection and (opt-in) content-listing feature (see
+    indexer/README.md, roadmap.md) something genuine to find and open,
+    rather than a placeholder file with the right extension and nothing
+    real inside it.
+
+    Deliberately non-overlapping file selections between the two
+    archives where there's enough material to do so, so a real run can
+    confirm each archive's listed contents independently rather than
+    both just reporting the same files. Falls back to a smaller (or
+    empty) archive gracefully if very few 'match' files exist -- an
+    empty ZIP/TAR is still a valid archive, worth Indexer detecting
+    correctly rather than crashing on.
+    """
+    archive_dir = root / "Archives"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    zip_count = min(3, len(match_files))
+    tar_count = min(2, max(len(match_files) - zip_count, 0))
+    zip_sources = match_files[:zip_count]
+    tar_sources = match_files[zip_count:zip_count + tar_count]
+
+    zip_path = archive_dir / "old_photos_backup.zip"
+    with zipfile.ZipFile(zip_path, 'w') as zf:
+        for f in zip_sources:
+            zf.write(f, arcname=f.name)
+
+    tar_path = archive_dir / "old_photos_backup.tar.gz"
+    with tarfile.open(tar_path, 'w:gz') as tf:
+        for f in tar_sources:
+            tf.add(f, arcname=f.name)
+
+    return zip_path, len(zip_sources), tar_path, len(tar_sources)
+
+
 def random_subfolder(root):
     return root / random.choice(SUBFOLDERS)
 
@@ -489,6 +530,13 @@ def main():
     print(f"  {'hidden':14s} {len(hidden_files):4d} file(s) -> across {len(HIDDEN_FOLDERS)} "
           f"dot-prefixed folder(s), e.g. {hidden_files[0].relative_to(root)}")
 
+    # Real ZIP and TAR.GZ archives, built from already-generated 'match'
+    # files -- gives Indexer's archive detection and opt-in content-listing
+    # feature something genuine to open, not just a placeholder extension.
+    zip_path, zip_file_count, tar_path, tar_file_count = make_archives(root, match_files)
+    print(f"  {'archives':14s} {2:4d} file(s) -> {zip_path.relative_to(root)} "
+          f"({zip_file_count} photo(s) inside), {tar_path.relative_to(root)} ({tar_file_count} photo(s) inside)")
+
     # Duplicate set: take a few 'match' files and copy them (same filename,
     # identical bytes) into several backup-style folders, so Duplicate
     # Finder has real cross-folder duplicates to find.
@@ -512,7 +560,7 @@ def main():
     print(f"  {'junk video':14s} {args.junk_videos:4d} file(s) -> unreadable .mp4 placeholders")
 
     total = (n_match + n_mismatch + n_no_exif + n_implausible + dup_count + args.junk_videos
-             + n * 7 + args.euro_date_samples + len(HIDDEN_FOLDERS) * args.hidden_samples)
+             + n * 7 + args.euro_date_samples + len(HIDDEN_FOLDERS) * args.hidden_samples + 2)
     print("-" * 60)
     print(f"Total files generated: {total}")
     print()
@@ -535,6 +583,10 @@ def main():
     print(f"  hidden           -> confidence ~100 (same evidence as 'match'); should show up in")
     print(f"                      located_files.db after Indexer runs -- if it doesn't, rglob is NOT")
     print(f"                      recursing into dot-prefixed folders and Indexer needs a fix")
+    print(f"  archives         -> Indexer should detect both under Archives/ regardless of")
+    print(f"                      look_inside_archives; with it set true, their real jpg contents")
+    print(f"                      ({zip_file_count} in the zip, {tar_file_count} in the tar.gz) should be listed")
+    print(f"                      in located_archives.matching_files -- neither extracted, just listed")
     print(f"  duplicates       -> should be found and grouped by Duplicate Finder")
     print(f"  junk video       -> no EXIF readable, behaves like a no_exif file "
           f"(excluded if require_exif=true)")
