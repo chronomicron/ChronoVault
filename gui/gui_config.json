@@ -1,0 +1,12 @@
+{
+    "tools": {
+        "indexer": {
+            "script": "indexer/indexer.py",
+            "config": "indexer/config.json"
+        },
+        "importer": {
+            "script": "importer/importer.py",
+            "config": "importer/config.json"
+        }
+    }
+}

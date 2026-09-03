@@ -144,6 +144,19 @@ except ImportError:
           "(only needed for Indexer's look_inside_archives=true on ISO files)",
           required=False)
 
+# --- PySide6 -- only needed for the GUI (chronovault.py / gui/chronovault_gui.py).
+# Every terminal tool works completely independently of this -- the GUI is a
+# convenience layer on top, never a requirement. ---
+try:
+    import PySide6
+    version = getattr(PySide6, "__version__", "installed")
+    check("PySide6", True, version, required=False)
+except ImportError:
+    check("PySide6", False,
+          "not installed -- pip install PySide6 --break-system-packages "
+          "(only needed for the GUI, see gui/README.md)",
+          required=False)
+
 # --- Write permission on the project root ---
 check(f"Write permission ({PROJECT_ROOT})", os.access(PROJECT_ROOT, os.W_OK), required=True)
 
