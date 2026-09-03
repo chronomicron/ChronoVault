@@ -458,14 +458,60 @@ def store_archives(conn, archive_files, media_extensions, look_inside_archives):
     }
 
 
+def looks_like_chronovault_archive(root_path):
+    """
+    True if root_path itself directly contains archive_database.db --
+    the file Importer, and only Importer, ever creates, always at the
+    root of whatever archive it built. A strong, unambiguous signal.
+
+    Found necessary by a real, reproducible accident, not a hypothetical:
+    pointing Indexer at an existing archive re-discovers every already-
+    organized photo as if it were new source material. Importer then
+    does its normal, correct job on each one -- recomputes the same
+    date, finds the destination already occupied (by itself), and its
+    existing filename-collision handling appends "(1)", "(2)" -- every
+    piece behaves exactly as designed, and the result is still entirely
+    wrong. This check exists to catch that before any scanning starts.
+
+    Deliberately checks only the search root itself, not the whole tree
+    beneath it -- catches exactly this case (pointing directly at an
+    archive), not the rarer case of an archive nested somewhere deep
+    inside a larger folder being scanned. That deeper case is a known,
+    accepted gap, not something this check claims to solve.
+    """
+    return (Path(root_path) / "archive_database.db").exists()
+
+
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: python indexer.py <config.json> <top_level_path>")
+    args = sys.argv[1:]
+    allow_archive_source = '--allow-archive-source' in args
+    args = [a for a in args if a != '--allow-archive-source']
+
+    if len(args) != 2:
+        print("Usage: python indexer.py <config.json> <top_level_path> [--allow-archive-source]")
         print("Example: python indexer.py config.json /home/user/documents")
+        print()
+        print("--allow-archive-source: proceed even if <top_level_path> looks like an")
+        print("  already-built ChronoVault archive (contains archive_database.db).")
+        print("  Only needed if you're deliberately migrating or consolidating an archive.")
         sys.exit(1)
 
-    config_file = sys.argv[1]
-    root_path = sys.argv[2]
+    config_file, root_path = args
+
+    # Checked before ANYTHING else -- before even opening located_files.db --
+    # so a mistaken invocation doesn't touch the database at all, not just
+    # exit cleanly partway through.
+    if looks_like_chronovault_archive(root_path) and not allow_archive_source:
+        print(f"Error: '{root_path}' looks like it might already be a ChronoVault archive")
+        print(f"(it contains 'archive_database.db', which only Importer ever creates).")
+        print()
+        print(f"Indexing an existing archive and importing it again would re-copy every file")
+        print(f"into itself, landing as duplicate '(1)', '(2)' copies -- almost certainly not")
+        print(f"what you want.")
+        print()
+        print(f"If you're deliberately migrating or consolidating an existing archive and know")
+        print(f"what you're doing, re-run with --allow-archive-source to proceed anyway.")
+        sys.exit(1)
 
     print(f"Loading configuration from: {config_file}")
     config = load_config(config_file)

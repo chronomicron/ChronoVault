@@ -57,6 +57,7 @@ python3 indexer/indexer.py indexer/config.json /path/to/search
 
 1. Path to the JSON config file (tells Indexer what to look for and where to store results)
 2. Top-level path to search — Indexer will recurse into every subfolder beneath this path
+3. `--allow-archive-source` (optional) — see **Safety Check: Refusing to Index an Existing Archive**, below
 
 **Example:**
 
@@ -65,6 +66,34 @@ python3 indexer/indexer.py indexer/config.json ~/Pictures
 ```
 
 This searches everything under `~/Pictures`, recursively, and logs any matching files into the database specified in `config.json`.
+
+## Safety Check: Refusing to Index an Existing Archive
+
+Before doing anything else — before even opening `located_files.db` — Indexer checks whether the search path itself directly contains `archive_database.db`, the file only Importer ever creates, always at the root of whatever archive it built. If found, Indexer refuses to proceed:
+
+```
+Error: 'my_archive' looks like it might already be a ChronoVault archive
+(it contains 'archive_database.db', which only Importer ever creates).
+
+Indexing an existing archive and importing it again would re-copy every file
+into itself, landing as duplicate '(1)', '(2)' copies -- almost certainly not
+what you want.
+
+If you're deliberately migrating or consolidating an existing archive and know
+what you're doing, re-run with --allow-archive-source to proceed anyway.
+```
+
+**Why this exists:** found via a real, reproducible mistake — pointing both the source and archive fields at the same existing archive. Every downstream tool behaved completely correctly given that input: Indexer found "new" files (they were just already-organized photos), Importer recomputed the same date for each, found its own destination already occupied by itself, and its existing filename-collision handling (`(1)`, `(2)`) did exactly what it's designed to do. Nothing was technically broken — the result was still entirely wrong. This check catches the situation before any of that happens.
+
+**The override**, `--allow-archive-source`, exists for the legitimate case: deliberately migrating or consolidating an archive. It's a one-off flag, not a persistent config setting, since "yes, I really mean to do this" isn't an ongoing preference the way `look_inside_archives` is.
+
+```
+python3 indexer/indexer.py indexer/config.json /path/to/old_archive --allow-archive-source
+```
+
+**Known, accepted limitation:** this only checks the search path itself, not the whole tree beneath it. An archive nested somewhere deep inside a much larger folder being scanned (rather than being the exact path given) won't be caught. This matches the reported case exactly (pointing directly at an archive) without adding the complexity of scanning ahead of time for a rarer, deeper scenario.
+
+The GUI performs the identical check (reusing this same function, not a separate copy) and shows a confirmation dialog instead of a terminal error — declining defaults to **not** proceeding.
 
 You can run Indexer again with a different path to add more locations to the same inventory:
 

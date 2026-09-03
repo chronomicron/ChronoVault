@@ -14,6 +14,7 @@ dragging in a GUI toolkit.
 """
 
 import json
+import sys
 from pathlib import Path
 
 GUI_DIR = Path(__file__).resolve().parent
@@ -42,6 +43,19 @@ def load_gui_config():
     except json.JSONDecodeError as e:
         print(f"ERROR: {GUI_CONFIG_PATH} is not valid JSON: {e}")
         return None
+
+
+def check_looks_like_archive(source_path):
+    """
+    Mirrors indexer.py's own archive-source detection exactly, by
+    importing and calling that SAME function rather than keeping a
+    second copy here that could quietly drift out of sync if the
+    detection logic is ever refined (e.g. to also check nested
+    archives, not just the search root itself).
+    """
+    sys.path.insert(0, str(PROJECT_ROOT / "indexer"))
+    from indexer import looks_like_chronovault_archive
+    return looks_like_chronovault_archive(source_path)
 
 
 def update_archive_root_in_config(config_relative_path, archive_path):

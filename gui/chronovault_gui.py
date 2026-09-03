@@ -44,7 +44,10 @@ except ImportError:
 # gui_data.py has no PySide6 dependency at all -- kept separate specifically
 # so its logic is testable without Qt installed. See that file's docstring.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gui_data import load_gui_config, update_archive_root_in_config, PROJECT_ROOT, GUI_SETTINGS_PATH
+from gui_data import (
+    load_gui_config, update_archive_root_in_config, check_looks_like_archive,
+    PROJECT_ROOT, GUI_SETTINGS_PATH
+)
 
 
 class ChronoVaultWindow(QMainWindow):
@@ -231,9 +234,26 @@ class ChronoVaultWindow(QMainWindow):
             QMessageBox.warning(self, "Folder not found", f"This folder doesn't exist:\n{source}")
             return
 
+        args = []
+        if check_looks_like_archive(source):
+            proceed = QMessageBox.question(
+                self, "This looks like a ChronoVault archive",
+                f"'{source}' looks like it might already be a ChronoVault archive "
+                f"(it contains archive_database.db).\n\n"
+                f"Indexing an existing archive and importing it again would re-copy every "
+                f"file into itself as duplicate copies -- almost certainly not what you "
+                f"want, unless you're deliberately migrating or consolidating an archive.\n\n"
+                f"Continue anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if proceed != QMessageBox.StandardButton.Yes:
+                return
+            args.append('--allow-archive-source')
+
         self._save_settings()
         tool = self.gui_config['tools']['indexer']
-        self._launch_tool("Indexer", tool['script'], [tool['config'], source])
+        self._launch_tool("Indexer", tool['script'], [tool['config'], source] + args)
 
     def _run_importer(self):
         if 'importer' not in self.gui_config.get('tools', {}):
