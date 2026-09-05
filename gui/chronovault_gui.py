@@ -33,7 +33,7 @@ try:
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QLabel, QLineEdit, QPushButton, QPlainTextEdit, QFileDialog,
-        QMessageBox
+        QMessageBox, QFrame
     )
 except ImportError:
     print("ERROR: PySide6 is not installed.")
@@ -156,9 +156,24 @@ class ChronoVaultWindow(QMainWindow):
         self.duplicate_button.clicked.connect(self._run_duplicate_finder)
         right_layout.addWidget(self.duplicate_button)
 
+        # Section separator -- groups form as more tools get wired in.
+        # Above: the main pipeline tools (all act on located_files.db
+        # and/or the archive). Below: diagnostics (read-only, no
+        # pipeline data touched).
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFrameShadow(QFrame.Shadow.Sunken)
+        right_layout.addWidget(separator)
+
+        right_layout.addWidget(QLabel("Diagnostics"))
+
+        self.test_env_button = QPushButton("Test Environment")
+        self.test_env_button.clicked.connect(self._run_test_env)
+        right_layout.addWidget(self.test_env_button)
+
         right_layout.addStretch(1)  # pushes everything below this down to the bottom of the panel
 
-        self.diagnostic_button = QPushButton("Generate Diagnostic Report")
+        self.diagnostic_button = QPushButton("Generate Report")
         self.diagnostic_button.clicked.connect(self._run_diagnostic_report)
         right_layout.addWidget(self.diagnostic_button)
 
@@ -205,13 +220,19 @@ class ChronoVaultWindow(QMainWindow):
         Disables EVERY action button while anything is running, not just
         the one that was clicked -- prevents two tools ever writing to
         the same database at once, which was an explicit design goal
-        going into this GUI, not an incidental restriction. This now
-        covers the right-panel tools too, not just Index/Import -- e.g.
-        Condition Database and Importer both touch located_files.db,
-        so it matters here just as much as it did before.
+        going into this GUI, not an incidental restriction. Test
+        Environment is included here too, even though it's read-only --
+        it still launches through the same shared QProcess slot as
+        everything else, so leaving it visually enabled while another
+        tool runs would be misleading (clicking it would just trigger
+        _launch_tool()'s "Another tool is already running" warning
+        rather than doing anything useful). Generate Report is
+        deliberately NOT included -- it runs synchronously in plain
+        Python, never touches self.process, and is meant to work even
+        while another tool is mid-run.
         """
-        for button in (self.index_button, self.import_button,
-                       self.condition_button, self.audit_button, self.duplicate_button):
+        for button in (self.index_button, self.import_button, self.condition_button,
+                       self.audit_button, self.duplicate_button, self.test_env_button):
             button.setEnabled(not running)
         self.status_label.setText(f"Running {tool_name}…" if running else "Ready.")
 
@@ -410,6 +431,20 @@ class ChronoVaultWindow(QMainWindow):
                 return
 
         self._launch_tool("Duplicate Finder", tool['script'], [tool['config']])
+
+    def _run_test_env(self):
+        """
+        No config file and no arguments at all -- test_env.py takes
+        neither. It resolves every path it checks (its own project root,
+        located_files.db, archive/) relative to its own script location,
+        not the current working directory, so unlike several other
+        tools here, there's no archive-path syncing concern at all.
+        """
+        if 'test_env' not in self.gui_config.get('tools', {}):
+            QMessageBox.critical(self, "Not configured", "No 'test_env' entry found in gui_config.json.")
+            return
+        tool = self.gui_config['tools']['test_env']
+        self._launch_tool("Test Environment", tool['script'], [])
 
     def _run_diagnostic_report(self):
         """

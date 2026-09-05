@@ -46,9 +46,13 @@ sudo apt install libxcb-cursor0
 ## Layout
 
 - **Left side** — the main pipeline: Source folder + Browse, Archive folder + Browse, **Index** and **Import** buttons, a status line, and a live-streaming read-only output panel.
-- **Right side** — a narrow panel, deliberately separate from the main flow, for every other tool as it gets wired in. Currently: **Condition Database**, **Audit Archive**, **Duplicate Finder**, and (pinned to the bottom, via a stretch) **Generate Diagnostic Report**.
+- **Right side** — a narrow panel, grouped as it grows:
+  - **Tools** — Condition Database, Audit Archive, Duplicate Finder (all touch `located_files.db` and/or the archive)
+  - *(separator)*
+  - **Diagnostics** — Test Environment (read-only dependency check)
+  - **Generate Report**, pinned to the bottom via a stretch
 
-All five action buttons (everything except Diagnostic Report) disable together while any one of them is running — not a minor UI nicety, this is what prevents two tools ever writing to the same database at once.
+Six of the seven right/left-side action buttons (everything except Generate Report) disable together while any one is running — not a minor UI nicety, this is what prevents two tools ever writing to the same database at once. Generate Report is deliberately excluded from this: it runs synchronously in plain Python, never touches the shared subprocess slot, and is meant to work even while another tool is mid-run.
 
 ## How the Archive Path Reaches Each Tool
 
@@ -66,11 +70,11 @@ Before Indexer does anything else, it checks whether the Source folder itself di
 
 `gui_settings.ini` keeps a rolling log of the last 50 events — every button press, every tool launch, every outcome — as a fixed-size circular buffer (50 numbered slots, a persisted index deciding which slot gets written next). This isn't just bookkeeping: it's the backbone of two real features.
 
-**Crash detection.** Every clean shutdown writes a specific marker as the very last event. At startup, if the previous session's last recorded event *isn't* that marker, something else happened — a crash, a force-quit, a lost connection — and the GUI notes this in the output panel (not a blocking popup; a startup dialog for what might just be an ordinary force-quit would be more annoying than helpful). The exact last recorded event is preserved and shown via Generate Diagnostic Report.
+**Crash detection.** Every clean shutdown writes a specific marker as the very last event. At startup, if the previous session's last recorded event *isn't* that marker, something else happened — a crash, a force-quit, a lost connection — and the GUI notes this in the output panel (not a blocking popup; a startup dialog for what might just be an ordinary force-quit would be more annoying than helpful). The exact last recorded event is preserved and shown via Generate Report.
 
 **Why a circular buffer specifically, not a simple rewrite-the-list-every-time log:** the persisted index means a restart after a crash does *not* reset back to slot zero — the next new entry continues from wherever the counter left off. The specific slots that recorded events leading up to a crash aren't at risk of being overwritten until the buffer wraps all the way back around to them (50 more events later), not immediately on the next restart.
 
-## Generate Diagnostic Report
+## Generate Report
 
 Bottom-right button. Produces a plain-text report — meant to be pasted directly when asking for help — combining:
 
@@ -102,6 +106,6 @@ Shown inline in the output panel and saved to `gui/diagnostic_report.txt`. Entir
 
 - No Stop button yet — closing the window while a tool is running doesn't cleanly terminate it.
 - No live per-file progress during a scan — Indexer's own progress-printing improvements (checkpointing every ~100 files) aren't built yet.
-- No formal Verify Status dialog yet — Generate Diagnostic Report covers much of the same need for now, but doesn't give a simple pass/fail checklist view.
+- No formal Verify Status dialog yet — Generate Report covers much of the same need for now, but doesn't give a simple pass/fail checklist view.
 - Condition Database has no archive-syncing need (it doesn't touch `archive_root` at all), so it's unaffected by anything described above.
 - Styling is default Qt (Fusion/native) — a deliberate choice to get the mechanics right first; a visual polish pass is planned for later, not forgotten.

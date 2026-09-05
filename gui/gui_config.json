@@ -19,6 +19,9 @@
         "duplicate_finder": {
             "script": "duplicate_finder/duplicate_finder.py",
             "config": "duplicate_finder/config.json"
+        },
+        "test_env": {
+            "script": "test_functions/test_env.py"
         }
     }
 }
