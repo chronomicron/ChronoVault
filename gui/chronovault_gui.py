@@ -27,7 +27,6 @@ Usage:
 import sys
 import json
 from pathlib import Path
-from configparser import ConfigParser
 
 try:
     from PySide6.QtCore import QProcess
@@ -46,6 +45,8 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gui_data import (
     load_gui_config, update_archive_root_in_config, check_looks_like_archive,
+    load_settings, save_settings, check_and_log_startup, log_clean_shutdown,
+    append_log_entry, get_log_entries, generate_diagnostic_report,
     PROJECT_ROOT, GUI_SETTINGS_PATH
 )
 
@@ -64,10 +65,9 @@ class ChronoVaultWindow(QMainWindow):
             # shown -- QMessageBox needs a window to exist first.
             self.gui_config = {"tools": {}}
 
-        self.settings = ConfigParser()
-        self.settings.read(GUI_SETTINGS_PATH)
-        if not self.settings.has_section('paths'):
-            self.settings.add_section('paths')
+        self.settings = load_settings()
+        self.previous_session_crashed = check_and_log_startup(self.settings)
+        save_settings(self.settings)
 
         self.process = None  # the currently-running QProcess, if any -- None means idle
 
@@ -76,7 +76,12 @@ class ChronoVaultWindow(QMainWindow):
 
     def _build_ui(self):
         central = QWidget()
-        layout = QVBoxLayout(central)
+        outer_layout = QHBoxLayout(central)
+
+        # --- Left column: the main pipeline flow (unchanged from before) ---
+        left_widget = QWidget()
+        layout = QVBoxLayout(left_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
 
         # --- Source folder row ---
         source_row = QHBoxLayout()
@@ -123,6 +128,42 @@ class ChronoVaultWindow(QMainWindow):
         self.output_panel.setStyleSheet("font-family: monospace;")
         layout.addWidget(self.output_panel, stretch=1)
 
+        outer_layout.addWidget(left_widget, 1)  # stretch factor 1 -- takes the remaining width
+
+        # --- Right column: narrow panel of additional tool/test buttons.
+        # Deliberately separate from the main Index/Import flow above --
+        # this is where every other tool (Condition Database, Audit
+        # Archive, Duplicate Finder today; test_functions scripts later)
+        # gets a button as it's wired in, without reworking the main
+        # flow's layout each time. Fixed narrow width, buttons stacked
+        # top to bottom, extra vertical space absorbed by the stretch at
+        # the end so buttons cluster together rather than spreading out.
+        right_widget = QWidget()
+        right_widget.setMaximumWidth(170)
+        right_layout = QVBoxLayout(right_widget)
+
+        right_layout.addWidget(QLabel("Tools"))
+
+        self.condition_button = QPushButton("Condition Database")
+        self.condition_button.clicked.connect(self._run_condition_database)
+        right_layout.addWidget(self.condition_button)
+
+        self.audit_button = QPushButton("Audit Archive")
+        self.audit_button.clicked.connect(self._run_audit_archive)
+        right_layout.addWidget(self.audit_button)
+
+        self.duplicate_button = QPushButton("Duplicate Finder")
+        self.duplicate_button.clicked.connect(self._run_duplicate_finder)
+        right_layout.addWidget(self.duplicate_button)
+
+        right_layout.addStretch(1)  # pushes everything below this down to the bottom of the panel
+
+        self.diagnostic_button = QPushButton("Generate Diagnostic Report")
+        self.diagnostic_button.clicked.connect(self._run_diagnostic_report)
+        right_layout.addWidget(self.diagnostic_button)
+
+        outer_layout.addWidget(right_widget)
+
         self.setCentralWidget(central)
 
     def _restore_settings(self):
@@ -133,28 +174,45 @@ class ChronoVaultWindow(QMainWindow):
     def _save_settings(self):
         self.settings['paths']['source_folder'] = self.source_field.text()
         self.settings['paths']['archive_folder'] = self.archive_field.text()
-        with open(GUI_SETTINGS_PATH, 'w') as f:
-            self.settings.write(f)
+        save_settings(self.settings)
+
+    def _log(self, description):
+        """
+        Records an event to the persistent rolling log in
+        gui_settings.ini, saved to disk IMMEDIATELY -- not batched until
+        the next natural save point -- so the entry survives even if
+        something crashes right after it's recorded. This is exactly
+        the data the Diagnostic Report button draws on to show what
+        actually happened, not just current state.
+        """
+        append_log_entry(self.settings, description)
+        save_settings(self.settings)
 
     def _browse_source(self):
         folder = QFileDialog.getExistingDirectory(self, "Select source folder to search")
         if folder:
             self.source_field.setText(folder)
+            self._log(f"Source folder set to: {folder}")
 
     def _browse_archive(self):
         folder = QFileDialog.getExistingDirectory(self, "Select archive folder")
         if folder:
             self.archive_field.setText(folder)
+            self._log(f"Archive folder set to: {folder}")
 
     def _set_running_state(self, running, tool_name=""):
         """
-        Disables BOTH action buttons while anything is running, not just
+        Disables EVERY action button while anything is running, not just
         the one that was clicked -- prevents two tools ever writing to
         the same database at once, which was an explicit design goal
-        going into this GUI, not an incidental restriction.
+        going into this GUI, not an incidental restriction. This now
+        covers the right-panel tools too, not just Index/Import -- e.g.
+        Condition Database and Importer both touch located_files.db,
+        so it matters here just as much as it did before.
         """
-        self.index_button.setEnabled(not running)
-        self.import_button.setEnabled(not running)
+        for button in (self.index_button, self.import_button,
+                       self.condition_button, self.audit_button, self.duplicate_button):
+            button.setEnabled(not running)
         self.status_label.setText(f"Running {tool_name}…" if running else "Ready.")
 
     def _append_output(self):
@@ -178,12 +236,15 @@ class ChronoVaultWindow(QMainWindow):
         if exit_status == QProcess.ExitStatus.CrashExit:
             self.output_panel.appendPlainText(f"\n--- {tool_name} was terminated or crashed. ---")
             self.status_label.setText(f"{tool_name} did not finish cleanly.")
+            self._log(f"{tool_name} crashed or was terminated")
         elif exit_code != 0:
             self.output_panel.appendPlainText(f"\n--- {tool_name} exited with an error (code {exit_code}). ---")
             self.status_label.setText(f"{tool_name} finished with an error.")
+            self._log(f"{tool_name} exited with an error (code {exit_code})")
         else:
             self.output_panel.appendPlainText(f"\n--- {tool_name} finished. ---")
             self.status_label.setText(f"{tool_name} finished successfully.")
+            self._log(f"{tool_name} finished successfully")
 
         self.process = None
         self._set_running_state(False)
@@ -210,6 +271,7 @@ class ChronoVaultWindow(QMainWindow):
             return
 
         self.output_panel.appendPlainText(f"\n$ python3 {script_relative_path} {' '.join(args)}")
+        self._log(f"{tool_name} launched: python3 {script_relative_path} {' '.join(args)}")
         self._set_running_state(True, tool_name)
 
         self.process = QProcess(self)
@@ -277,7 +339,106 @@ class ChronoVaultWindow(QMainWindow):
 
         self._launch_tool("Importer", tool['script'], [tool['config']])
 
+    def _run_condition_database(self):
+        """
+        Launched with its own config.json completely unchanged -- same
+        as chronovault.sh's own Condition Database step. Unlike Importer,
+        this tool has no archive_root concept at all (it operates on
+        located_files.db directly), so there's nothing for the GUI to
+        sync before running it.
+        """
+        if 'condition_database' not in self.gui_config.get('tools', {}):
+            QMessageBox.critical(self, "Not configured", "No 'condition_database' entry found in gui_config.json.")
+            return
+        tool = self.gui_config['tools']['condition_database']
+        self._launch_tool("Condition Database", tool['script'], [tool['config']])
+
+    def _run_audit_archive(self):
+        """
+        Now syncs the Archive field before running -- reversed from an
+        earlier version that deliberately left this unsynced. That
+        turned out to be wrong in practice: Importer would succeed
+        against a custom archive path while this tool silently checked
+        the stale default instead, failing with "Archive root 'archive'
+        does not exist" -- a correct error, but a confusing, avoidable
+        one. Same requirement as Importer: needs a real archive path,
+        since this tool has no meaningful way to run without one.
+        """
+        if 'audit_archive' not in self.gui_config.get('tools', {}):
+            QMessageBox.critical(self, "Not configured", "No 'audit_archive' entry found in gui_config.json.")
+            return
+
+        archive = self.archive_field.text().strip()
+        if not archive:
+            QMessageBox.warning(self, "Missing archive folder", "Choose an archive folder first.")
+            return
+
+        tool = self.gui_config['tools']['audit_archive']
+        try:
+            update_archive_root_in_config(tool['config'], archive)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            QMessageBox.critical(self, "Config error", f"Could not update {tool['config']}:\n{e}")
+            return
+
+        self._launch_tool("Audit Archive", tool['script'], [tool['config']])
+
+    def _run_duplicate_finder(self):
+        """
+        Also now syncs, same reversal and reasoning as Audit Archive
+        above -- but the Archive field is NOT required here, unlike
+        Audit Archive/Importer. Duplicate Finder is dual-mode: in
+        'source' mode it doesn't need an archive_root at all, so forcing
+        the field would incorrectly block a legitimate source-mode run.
+        If the field is empty, this just launches with whatever mode and
+        settings are already in the config file, same as chronovault.sh
+        would. update_archive_root_in_config() is itself mode-aware, so
+        even when the field IS filled in, a source-mode config is left
+        alone rather than getting an unused archive_root written into it.
+        """
+        if 'duplicate_finder' not in self.gui_config.get('tools', {}):
+            QMessageBox.critical(self, "Not configured", "No 'duplicate_finder' entry found in gui_config.json.")
+            return
+
+        tool = self.gui_config['tools']['duplicate_finder']
+        archive = self.archive_field.text().strip()
+
+        if archive:
+            try:
+                update_archive_root_in_config(tool['config'], archive)
+            except (FileNotFoundError, json.JSONDecodeError) as e:
+                QMessageBox.critical(self, "Config error", f"Could not update {tool['config']}:\n{e}")
+                return
+
+        self._launch_tool("Duplicate Finder", tool['script'], [tool['config']])
+
+    def _run_diagnostic_report(self):
+        """
+        Read-only, and deliberately NOT gated by _set_running_state --
+        this should work even while another tool is mid-run (that's
+        often exactly when you'd want it), and it never writes to
+        anything the pipeline tools care about. Shows the report inline
+        in the output panel (consistent with everything else appearing
+        there) and also saves it to a file, since a file is easier to
+        copy in full or attach than scrolling back through the panel.
+        """
+        self._log("Diagnostic Report generated")
+        report = generate_diagnostic_report(
+            self.source_field.text().strip(),
+            self.archive_field.text().strip(),
+            log_entries=get_log_entries(self.settings)
+        )
+        self.output_panel.appendPlainText("\n" + report)
+
+        report_path = PROJECT_ROOT / "gui" / "diagnostic_report.txt"
+        try:
+            with open(report_path, 'w') as f:
+                f.write(report)
+            self.output_panel.appendPlainText(f"\n(Also saved to {report_path})")
+        except OSError as e:
+            self.output_panel.appendPlainText(f"\n(Could not save report to file: {e})")
+
     def closeEvent(self, event):
+        log_clean_shutdown(self.settings)
         self._save_settings()
         super().closeEvent(event)
 
@@ -291,6 +452,18 @@ def main():
             window, "Missing configuration",
             "gui/gui_config.json was not found or could not be read.\n"
             "The Index and Import buttons won't work until it's restored."
+        )
+
+    if window.previous_session_crashed:
+        # Not a blocking dialog on purpose -- a startup popup for
+        # something that may well have been an ordinary force-quit is
+        # more annoying than helpful. A visible note in the same output
+        # panel everything else appears in is enough; the full detail
+        # (exactly what the last recorded event was) is one click away
+        # via Generate Diagnostic Report.
+        window.output_panel.appendPlainText(
+            "Note: the previous session didn't shut down cleanly (no clean-exit record found). "
+            "If something seems off, use 'Generate Diagnostic Report' on the right for details."
         )
 
     window.show()

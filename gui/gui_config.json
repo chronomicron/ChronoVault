@@ -7,6 +7,18 @@
         "importer": {
             "script": "importer/importer.py",
             "config": "importer/config.json"
+        },
+        "condition_database": {
+            "script": "condition_database/condition_database.py",
+            "config": "condition_database/config.json"
+        },
+        "audit_archive": {
+            "script": "audit_archive/audit_archive.py",
+            "config": "audit_archive/config.json"
+        },
+        "duplicate_finder": {
+            "script": "duplicate_finder/duplicate_finder.py",
+            "config": "duplicate_finder/config.json"
         }
     }
 }
