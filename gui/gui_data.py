@@ -174,6 +174,43 @@ def load_gui_config():
         return None
 
 
+def check_folder_writable(folder):
+    """
+    Actually attempts a real write (a temp marker folder, created then
+    immediately removed) rather than trusting os.access(), which is a
+    known-unreliable predictor of real write capability in exactly the
+    situations this project cares about most:
+
+    - Root bypasses Unix permission bits entirely (DAC_OVERRIDE) --
+      confirmed directly: os.access() reported a chmod 444 directory as
+      writable while running as root, and an actual write attempt
+      against it genuinely succeeded. Technically accurate for root,
+      but a reminder that permission bits alone don't tell the whole
+      story.
+    - FAT32/exFAT removable drives -- the primary real-world case this
+      whole project targets (USB keys, old external HDDs) -- often
+      don't support Unix permission bits meaningfully at all; what
+      stat() reports can be synthetic and unrelated to real write
+      capability.
+    - NAS/NFS/SMB shares can enforce permissions server-side in ways
+      that don't match what the client reports locally.
+
+    Actually attempting the operation sidesteps all three by testing
+    the real thing directly, not inferring it from metadata that might
+    not reflect reality.
+
+    Returns (True, None) if the folder is genuinely writable, or
+    (False, error_message) if not.
+    """
+    try:
+        test_path = Path(folder) / ".chronovault_write_test"
+        test_path.mkdir(exist_ok=True)
+        test_path.rmdir()
+        return True, None
+    except OSError as e:
+        return False, str(e)
+
+
 def check_looks_like_archive(source_path):
     """
     Mirrors indexer.py's own archive-source detection exactly, by

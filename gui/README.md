@@ -46,13 +46,15 @@ sudo apt install libxcb-cursor0
 ## Layout
 
 - **Left side** — the main pipeline: Source folder + Browse, Archive folder + Browse, **Index** and **Import** buttons, a status line, and a live-streaming read-only output panel.
-- **Right side** — a narrow panel, grouped as it grows:
-  - **Tools** — Condition Database, Audit Archive, Duplicate Finder (all touch `located_files.db` and/or the archive)
+- **Right side** — a narrow panel, grouped by how often you'd actually use each thing, not just logical category:
+  - **Tools** — Condition Database, Audit Archive, Duplicate Finder (all touch `located_files.db` and/or the archive) — normal day-to-day pipeline use
   - *(separator)*
-  - **Diagnostics** — Test Environment (read-only dependency check)
-  - **Generate Report**, pinned to the bottom via a stretch
+  - **Diagnostics** — Test Environment, Test Retrieve Data — occasional, read-only checks
+  - *(separator)*
+  - **Utilities** — Generate Test Data — one-off setup, not part of normal running
+  - **Generate Report**, pinned to the very bottom via a stretch — only needed when something's gone wrong
 
-Six of the seven right/left-side action buttons (everything except Generate Report) disable together while any one is running — not a minor UI nicety, this is what prevents two tools ever writing to the same database at once. Generate Report is deliberately excluded from this: it runs synchronously in plain Python, never touches the shared subprocess slot, and is meant to work even while another tool is mid-run.
+Eight of the nine right/left-side action buttons (everything except Generate Report) disable together while any one is running — not a minor UI nicety, this is what prevents two tools ever writing to the same database at once. Generate Report is the one deliberate exception: it runs synchronously in plain Python, never touches the shared subprocess slot, and is meant to work even while another tool is mid-run.
 
 ## How the Archive Path Reaches Each Tool
 
@@ -73,6 +75,16 @@ Before Indexer does anything else, it checks whether the Source folder itself di
 **Crash detection.** Every clean shutdown writes a specific marker as the very last event. At startup, if the previous session's last recorded event *isn't* that marker, something else happened — a crash, a force-quit, a lost connection — and the GUI notes this in the output panel (not a blocking popup; a startup dialog for what might just be an ordinary force-quit would be more annoying than helpful). The exact last recorded event is preserved and shown via Generate Report.
 
 **Why a circular buffer specifically, not a simple rewrite-the-list-every-time log:** the persisted index means a restart after a crash does *not* reset back to slot zero — the next new entry continues from wherever the counter left off. The specific slots that recorded events leading up to a crash aren't at risk of being overwritten until the buffer wraps all the way back around to them (50 more events later), not immediately on the next restart.
+
+## Test Retrieve Data
+
+Lists everything currently sitting in the review bucket (`date_uncertain = 1`), confirming `retrieve_data.py`'s read-only functions work and genuinely serialize to JSON. Requires the Archive field (like Audit Archive and Importer) and syncs it into `test_functions/test_retrieve_data_config.json` before running — this needed a real fix: the script originally hardcoded its archive location as a Python constant, which would have silently looked in the wrong place for anyone using a NAS, network share, or removable drive (exactly this project's real-world case, where the same physical drive can mount at a different path every time it's replugged). Now it reads `archive_root` from a config file, matching every other archive-aware tool, so the GUI's existing sync mechanism just works here too, unchanged.
+
+## Generate Test Data
+
+The one button that doesn't use the Source/Archive fields at all — clicking it opens its own folder picker, since generating test data is a one-off setup action unrelated to whatever the main pipeline is currently pointed at. Writes into a `test_data` **subfolder** of whatever you pick, not directly into the picked folder itself — `generate_test_data.py` scatters a dozen top-level folders (`DCIM/`, `Old_Backup_1/`, `Archives/`, etc.) into its output directory, and dumping those straight into an arbitrary chosen folder would mix them in with whatever's already there.
+
+**Write-permission check, and a real fix along the way:** before launching, the GUI actually attempts a real write (a temp marker created then removed) rather than trusting `os.access()`. This isn't caution for its own sake — testing directly confirmed `os.access()` is unreliable in exactly the situations this project cares about most: it reports a folder as writable whenever the GUI happens to be run as root, regardless of actual permission bits (root bypasses Unix permissions entirely — confirmed by an actual write succeeding against a `chmod 444` directory), and it's also known to misreport on FAT32/exFAT removable drives — this project's primary real-world case — and NAS/NFS/SMB shares, where reported permission bits don't always reflect what's actually enforced server-side. Actually attempting the operation sidesteps all of that.
 
 ## Generate Report
 

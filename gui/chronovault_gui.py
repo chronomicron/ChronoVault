@@ -45,8 +45,8 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gui_data import (
     load_gui_config, update_archive_root_in_config, check_looks_like_archive,
-    load_settings, save_settings, check_and_log_startup, log_clean_shutdown,
-    append_log_entry, get_log_entries, generate_diagnostic_report,
+    check_folder_writable, load_settings, save_settings, check_and_log_startup,
+    log_clean_shutdown, append_log_entry, get_log_entries, generate_diagnostic_report,
     PROJECT_ROOT, GUI_SETTINGS_PATH
 )
 
@@ -171,7 +171,27 @@ class ChronoVaultWindow(QMainWindow):
         self.test_env_button.clicked.connect(self._run_test_env)
         right_layout.addWidget(self.test_env_button)
 
-        right_layout.addStretch(1)  # pushes everything below this down to the bottom of the panel
+        self.test_retrieve_button = QPushButton("Test Retrieve Data")
+        self.test_retrieve_button.clicked.connect(self._run_test_retrieve_data)
+        right_layout.addWidget(self.test_retrieve_button)
+
+        right_layout.addStretch(1)  # pushes the Utilities group below down to the bottom of the panel
+
+        # Second separator: below this, tools used only occasionally --
+        # generating test data is a one-off setup action, and a
+        # diagnostic report is only needed when something's gone wrong,
+        # neither is part of normal day-to-day running the way the
+        # Tools/Diagnostics groups above are.
+        separator2 = QFrame()
+        separator2.setFrameShape(QFrame.Shape.HLine)
+        separator2.setFrameShadow(QFrame.Shadow.Sunken)
+        right_layout.addWidget(separator2)
+
+        right_layout.addWidget(QLabel("Utilities"))
+
+        self.generate_test_data_button = QPushButton("Generate Test Data")
+        self.generate_test_data_button.clicked.connect(self._run_generate_test_data)
+        right_layout.addWidget(self.generate_test_data_button)
 
         self.diagnostic_button = QPushButton("Generate Report")
         self.diagnostic_button.clicked.connect(self._run_diagnostic_report)
@@ -221,18 +241,20 @@ class ChronoVaultWindow(QMainWindow):
         the one that was clicked -- prevents two tools ever writing to
         the same database at once, which was an explicit design goal
         going into this GUI, not an incidental restriction. Test
-        Environment is included here too, even though it's read-only --
-        it still launches through the same shared QProcess slot as
-        everything else, so leaving it visually enabled while another
-        tool runs would be misleading (clicking it would just trigger
-        _launch_tool()'s "Another tool is already running" warning
-        rather than doing anything useful). Generate Report is
-        deliberately NOT included -- it runs synchronously in plain
+        Environment, Test Retrieve Data, and Generate Test Data are all
+        included even though none of them risk a real conflict with
+        most other tools -- they still launch through the single shared
+        QProcess slot this GUI tracks, so leaving them visually enabled
+        while another tool runs would be misleading (clicking one would
+        just trigger _launch_tool()'s "Another tool is already running"
+        warning rather than doing anything useful). Generate Report is
+        the one deliberate exception -- it runs synchronously in plain
         Python, never touches self.process, and is meant to work even
         while another tool is mid-run.
         """
         for button in (self.index_button, self.import_button, self.condition_button,
-                       self.audit_button, self.duplicate_button, self.test_env_button):
+                       self.audit_button, self.duplicate_button, self.test_env_button,
+                       self.test_retrieve_button, self.generate_test_data_button):
             button.setEnabled(not running)
         self.status_label.setText(f"Running {tool_name}…" if running else "Ready.")
 
@@ -445,6 +467,83 @@ class ChronoVaultWindow(QMainWindow):
             return
         tool = self.gui_config['tools']['test_env']
         self._launch_tool("Test Environment", tool['script'], [])
+
+    def _run_test_retrieve_data(self):
+        """
+        Requires the Archive field, same as Audit Archive/Importer --
+        unlike Duplicate Finder, this tool has no mode where an archive
+        isn't needed at all. Syncs archive_root into its own config.json
+        before launching, using the exact same mode-aware function used
+        everywhere else -- this config has no 'mode' key, so it's always
+        updated, the same as Importer/Audit Archive.
+        """
+        if 'test_retrieve_data' not in self.gui_config.get('tools', {}):
+            QMessageBox.critical(self, "Not configured", "No 'test_retrieve_data' entry found in gui_config.json.")
+            return
+
+        archive = self.archive_field.text().strip()
+        if not archive:
+            QMessageBox.warning(self, "Missing archive folder", "Choose an archive folder first.")
+            return
+
+        tool = self.gui_config['tools']['test_retrieve_data']
+        try:
+            update_archive_root_in_config(tool['config'], archive)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            QMessageBox.critical(self, "Config error", f"Could not update {tool['config']}:\n{e}")
+            return
+
+        self._launch_tool("Test Retrieve Data", tool['script'], [tool['config']])
+
+    def _run_generate_test_data(self):
+        """
+        Unlike every other button here, this doesn't use the Source or
+        Archive fields at all -- it prompts for its own destination via
+        a dedicated folder dialog, since generating test data is a
+        one-off setup action unrelated to whatever the main pipeline
+        fields currently point at.
+
+        Writes into a 'test_data' SUBFOLDER of whatever's picked, not
+        directly into the picked folder itself -- generate_test_data.py
+        scatters a dozen top-level folders (DCIM/, Old_Backup_1/,
+        Archives/, etc.) into its output directory, and dumping those
+        straight into an arbitrary chosen folder would mix them in with
+        whatever's already there. A dedicated subfolder keeps the
+        generated content self-contained and obviously identifiable.
+
+        Checks write permission before launching by actually attempting
+        a real write (via check_folder_writable), rather than trusting
+        os.access() -- confirmed directly to be an unreliable predictor
+        here: it reports a folder as writable whenever the GUI happens
+        to run as root, regardless of actual permission bits, and is
+        also known to misreport on FAT32/exFAT removable drives (this
+        project's primary real-world case) and NAS/NFS/SMB shares,
+        where reported permission bits don't always reflect what's
+        actually enforced. Actually attempting the operation sidesteps
+        all of that by testing reality directly.
+        """
+        if 'generate_test_data' not in self.gui_config.get('tools', {}):
+            QMessageBox.critical(self, "Not configured", "No 'generate_test_data' entry found in gui_config.json.")
+            return
+
+        parent_folder = QFileDialog.getExistingDirectory(
+            self, "Select a folder -- a 'test_data' subfolder will be created inside it"
+        )
+        if not parent_folder:
+            return  # cancelled
+
+        writable, error = check_folder_writable(parent_folder)
+        if not writable:
+            QMessageBox.warning(self, "Folder not writable",
+                                 f"Could not write to this folder:\n{parent_folder}\n\n{error}\n\n"
+                                 f"Choose a different folder.")
+            return
+
+        output_dir = str(Path(parent_folder) / "test_data")
+        self._log(f"Generate Test Data: destination set to {output_dir}")
+
+        tool = self.gui_config['tools']['generate_test_data']
+        self._launch_tool("Generate Test Data", tool['script'], ['--output-dir', output_dir])
 
     def _run_diagnostic_report(self):
         """

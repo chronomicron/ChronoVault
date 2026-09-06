@@ -22,6 +22,13 @@
         },
         "test_env": {
             "script": "test_functions/test_env.py"
+        },
+        "test_retrieve_data": {
+            "script": "test_functions/test_retrieve_data.py",
+            "config": "test_functions/test_retrieve_data_config.json"
+        },
+        "generate_test_data": {
+            "script": "generate_test_data/generate_test_data.py"
         }
     }
 }

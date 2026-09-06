@@ -1,5 +1,5 @@
 {
     "mode": "archive",
-    "archive_root": "/home/omoikane/workspace/ChronoVault/chronovault_test/archive",
+    "archive_root": "/home/omoikane/workspace/ChronoVault/chronovault_test",
     "output_path": "duplicate_report.json"
 }
