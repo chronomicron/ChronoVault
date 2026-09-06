@@ -45,9 +45,9 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gui_data import (
     load_gui_config, update_archive_root_in_config, check_looks_like_archive,
-    check_folder_writable, load_settings, save_settings, check_and_log_startup,
-    log_clean_shutdown, append_log_entry, get_log_entries, generate_diagnostic_report,
-    PROJECT_ROOT, GUI_SETTINGS_PATH
+    check_folder_writable, check_archive_destination, load_settings, save_settings,
+    check_and_log_startup, log_clean_shutdown, append_log_entry, get_log_entries,
+    generate_diagnostic_report, PROJECT_ROOT, GUI_SETTINGS_PATH
 )
 
 
@@ -369,6 +369,39 @@ class ChronoVaultWindow(QMainWindow):
         if not archive:
             QMessageBox.warning(self, "Missing archive folder", "Choose an archive folder first.")
             return
+
+        # Only interrupts for the genuinely ambiguous case: an existing
+        # archive proceeds silently, and so does a brand-new/empty
+        # folder -- neither needs a person to confirm anything. Found
+        # necessary by a real mistake: pointing Import at the same
+        # top-level folder used for generated test data mixed
+        # archive_database.db and the date folders directly alongside
+        # unrelated content, rather than into a dedicated subfolder.
+        destination_status = check_archive_destination(archive)
+        if destination_status == 'nonempty_no_archive':
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("Archive location has no database yet")
+            box.setText(
+                f"'{archive}' already has other files or folders in it, but no "
+                f"archive_database.db -- this doesn't look like an established archive yet.\n\n"
+                f"This can happen if a higher-level folder gets selected by mistake (e.g. the "
+                f"same parent folder used for generated test data)."
+            )
+            use_anyway = box.addButton("Use This Folder Anyway", QMessageBox.ButtonRole.AcceptRole)
+            create_subfolder = box.addButton("Create 'archive' Subfolder Here", QMessageBox.ButtonRole.ActionRole)
+            cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(cancel)
+            box.exec()
+            clicked = box.clickedButton()
+
+            if clicked is cancel:
+                return
+            elif clicked is create_subfolder:
+                archive = str(Path(archive) / "archive")
+                self.archive_field.setText(archive)
+                self._log(f"Archive folder redirected to dedicated subfolder: {archive}")
+            # else: "Use This Folder Anyway" -- proceed with the original archive value unchanged
 
         self._save_settings()
         tool = self.gui_config['tools']['importer']

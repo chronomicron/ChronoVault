@@ -211,6 +211,57 @@ def check_folder_writable(folder):
         return False, str(e)
 
 
+def check_archive_destination(archive_path):
+    """
+    Classify an archive destination folder into one of three states, so
+    the GUI can decide whether a confirmation is actually warranted
+    before Importer writes into it for the first time -- creating
+    archive_database.db and its YYYY/MM/DD folders there.
+
+        'existing_archive'    -- archive_database.db already present;
+                                  clearly an established archive,
+                                  nothing to ask about.
+        'empty_or_new'        -- the folder doesn't exist yet, or exists
+                                  but is completely empty; clearly safe
+                                  to create a new archive here, nothing
+                                  to ask about.
+        'nonempty_no_archive' -- the folder exists and has OTHER content
+                                  in it, but no archive_database.db.
+                                  This is the genuinely ambiguous case:
+                                  was this folder really meant to BE the
+                                  archive, or did a too-high-up folder
+                                  get selected by mistake? Found via a
+                                  real mistake, not a hypothetical:
+                                  generating test data into a folder,
+                                  then separately pointing Import at
+                                  that SAME top-level folder, mixed the
+                                  archive's own database and date
+                                  folders directly alongside the
+                                  unrelated generated test data.
+
+    Only the third case is worth interrupting anyone for -- a blanket
+    "are you sure?" on every brand-new archive would just be friction
+    people click through without reading, defeating the point.
+    """
+    path = Path(archive_path)
+
+    if (path / "archive_database.db").exists():
+        return 'existing_archive'
+
+    if not path.exists():
+        return 'empty_or_new'
+
+    try:
+        has_content = any(path.iterdir())
+    except OSError:
+        # Can't even list it (permissions, a transient removable-media
+        # hiccup) -- don't block on a check that can't actually be
+        # performed; Importer's own error handling takes it from here.
+        return 'empty_or_new'
+
+    return 'nonempty_no_archive' if has_content else 'empty_or_new'
+
+
 def check_looks_like_archive(source_path):
     """
     Mirrors indexer.py's own archive-source detection exactly, by

@@ -68,6 +68,24 @@ Clicking a button that needs an archive location doesn't invent a new way of tel
 
 Before Indexer does anything else, it checks whether the Source folder itself directly contains `archive_database.db` — the file only Importer ever creates. If found, it refuses, since indexing an archive and importing it again just re-copies every file into itself as `(1)`, `(2)` duplicates. The GUI shows a confirmation dialog (defaulting to **No**) instead of the terminal's plain error message; declining doesn't proceed. See `indexer/README.md` for the full detail and the `--allow-archive-source` override this uses under the hood.
 
+## Safety Check: Archive Destination Has No Database Yet
+
+Before Importer writes anywhere for the first time, the GUI classifies the Archive folder into one of three states:
+
+- **Already an archive** (`archive_database.db` present) — proceeds silently, nothing to ask.
+- **Empty or doesn't exist yet** — clearly safe to create a new archive here, proceeds silently.
+- **Has other content, but no `archive_database.db`** — genuinely ambiguous, and the only case that interrupts you.
+
+**Found via a real mistake, not a hypothetical:** generating test data into a folder, then separately pointing Import at that *same top-level* folder, put `archive_database.db` and the date folders directly alongside the unrelated generated test data — Importer did exactly what it was told (use `archive_root` literally, no automatic subfolder), but nothing had ever asked whether that was actually intended.
+
+For the ambiguous case, the dialog offers a real fix, not just a warning:
+
+- **Use This Folder Anyway** — proceed exactly as typed.
+- **Create 'archive' Subfolder Here** — redirects to a dedicated `<folder>/archive` subfolder, updates the Archive field to match, and continues. One click to fix the exact mistake above, rather than cancel → browse again → retype.
+- **Cancel** (default) — stop, change nothing.
+
+This check only applies to Importer — Audit Archive and Duplicate Finder already fail cleanly on their own if pointed at a folder with no `archive_database.db` (they only ever read an existing archive, never create one), so the ambiguous-mixing risk is specific to the one tool that writes a brand-new archive into place.
+
 ## Persistent Activity Log and Crash Detection
 
 `gui_settings.ini` keeps a rolling log of the last 50 events — every button press, every tool launch, every outcome — as a fixed-size circular buffer (50 numbered slots, a persisted index deciding which slot gets written next). This isn't just bookkeeping: it's the backbone of two real features.
