@@ -323,12 +323,27 @@ def _describe_tool_config(tool_name, tool_entry):
     whether whatever path they point to actually exists. Not a full
     config dump; just the keys relevant to diagnosing "why did this
     tool fail," which is this report's entire purpose.
+
+    'config' is genuinely optional in gui_config.json -- test_env and
+    generate_test_data both have entries with no 'config' key at all,
+    since neither needs one (test_env.py takes no arguments at all;
+    generate_test_data's destination comes from an interactive folder
+    picker, not a config file). An earlier version of this function
+    assumed every tool entry had a 'config' key unconditionally, which
+    crashed with a raw KeyError the moment the report generator reached
+    either of those two entries -- caught via a real run, not review.
     """
     lines = [f"[{tool_name}]"]
     script_path = PROJECT_ROOT / tool_entry['script']
-    config_path = PROJECT_ROOT / tool_entry['config']
     lines.append(f"  script: {tool_entry['script']}  (exists: {script_path.exists()})")
-    lines.append(f"  config: {tool_entry['config']}  (exists: {config_path.exists()})")
+
+    config_relative = tool_entry.get('config')
+    if config_relative is None:
+        lines.append("  config: (none -- this tool takes no config file)")
+        return "\n".join(lines)
+
+    config_path = PROJECT_ROOT / config_relative
+    lines.append(f"  config: {config_relative}  (exists: {config_path.exists()})")
 
     if not config_path.exists():
         return "\n".join(lines)

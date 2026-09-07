@@ -587,13 +587,33 @@ class ChronoVaultWindow(QMainWindow):
         in the output panel (consistent with everything else appearing
         there) and also saves it to a file, since a file is easier to
         copy in full or attach than scrolling back through the panel.
+
+        generate_diagnostic_report() is wrapped in a try/except -- found
+        necessary by a real crash: an earlier version logged "Diagnostic
+        Report generated" BEFORE attempting generation, then had no
+        handling at all if it failed, so an exception propagated straight
+        to the terminal with zero visible sign in the GUI itself that
+        anything had gone wrong. That's the worst possible failure mode
+        for specifically this feature -- its entire purpose is helping
+        when something's wrong, so it silently failing is the one thing
+        it must never do. The log entry now reflects what actually
+        happened (generated vs. FAILED), not an assumption made before
+        the attempt.
         """
+        try:
+            report = generate_diagnostic_report(
+                self.source_field.text().strip(),
+                self.archive_field.text().strip(),
+                log_entries=get_log_entries(self.settings)
+            )
+        except Exception as e:
+            self._log(f"Diagnostic Report generation FAILED: {e}")
+            self.output_panel.appendPlainText(f"\n--- Could not generate diagnostic report: {e} ---")
+            QMessageBox.critical(self, "Diagnostic Report Failed",
+                                  f"Could not generate the diagnostic report:\n\n{e}")
+            return
+
         self._log("Diagnostic Report generated")
-        report = generate_diagnostic_report(
-            self.source_field.text().strip(),
-            self.archive_field.text().strip(),
-            log_entries=get_log_entries(self.settings)
-        )
         self.output_panel.appendPlainText("\n" + report)
 
         report_path = PROJECT_ROOT / "gui" / "diagnostic_report.txt"
