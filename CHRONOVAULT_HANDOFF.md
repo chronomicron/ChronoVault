@@ -224,3 +224,47 @@ No persistent memory of this user or project was found. Per system configuration
 ## Changelog
 
 - **v1** — Initial generation, single pass, covering the full conversation history available at time of writing.
+
+You're right, and I apologize for the runaround — here it is directly, no more tool calls, just the text to paste yourself:
+
+---
+
+## Devnote — 2026-09-10
+
+**Context:** First full working session on this project since migrating it to this Claude account. Everything below was designed, built, and tested in this conversation.
+
+### Bugs found and fixed (real, not hypothetical — each confirmed via actual runs)
+- **`ocr_tools.py`** imported `cv2`/`numpy`/`pytesseract` at module level, meaning anyone using `analyze_date` at all (via Importer, Condition Database) needed those installed even without touching OCR. Fixed with lazy imports inside the two functions that actually need them.
+- **`condition_database.py`** never ensured the `file_hash` column existed before reading/writing it — broke on the very first run in the documented pipeline order (Indexer → Condition Database, before Duplicate Finder ever creates that column). Fixed with the missing `ensure_column()` call.
+- **`test_retrieve_data.py`** hardcoded `ARCHIVE_ROOT = "archive"` as a Python constant instead of reading it from a config file — would silently look in the wrong place for anyone on a NAS, network share, or removable drive. Fixed to read `archive_root` from `test_functions/test_retrieve_data_config.json`, matching every other archive-aware tool.
+- **GUI: Audit Archive and Duplicate Finder** were deliberately left unsynced with the GUI's Archive field (reasoning: "supplementary tools"). Wrong in practice — Importer would succeed against a custom archive path while these two silently checked a stale default. Fixed by making the sync function mode-aware and applying it to all three.
+- **GUI: Generate Report crashed** (`KeyError: 'config'`) the moment it reached a tool with no config file (Test Environment, Generate Test Data). Fixed, and separately added proper try/except handling so this feature — whose entire job is helping when something's wrong — can never fail silently again.
+- **GUI: write-permission check** for Generate Test Data used `os.access()`, confirmed unreliable under root (bypasses permission bits entirely) and on FAT32/NAS media (this project's actual real-world case). Fixed to attempt a real write instead of trusting metadata.
+- **Missing Linux system dependency**: `libxcb-cursor0` needed for PySide6/Qt 6.5+, not a Python issue — documented with the fix.
+
+### Indexer: new capabilities
+- **Archive detection** (zip/tar/tar.gz/iso) — location always recorded; opt-in content **listing** via `look_inside_archives` (no extraction, no mounting), with backfill support if the flag is turned on in a later run over the same source.
+- **Safety check**: refuses to index a folder that's already a ChronoVault archive (`archive_database.db` present), since a real test run showed this causes files to get re-copied into themselves as `(1)`/`(2)` duplicates. Override: `--allow-archive-source`.
+
+### GUI v0.1 — built from nothing this session
+- `chronovault.py` launcher + `gui/` folder (`chronovault_gui.py`, `gui_data.py` — Qt-free logic kept separate and independently testable, `gui_config.json` static config, `gui_settings.ini` dynamic state).
+- Main window: Source/Archive fields + Browse, Index/Import buttons, live streaming output via `QProcess`.
+- Right panel, grouped by frequency of use: **Tools** (Condition Database, Audit Archive, Duplicate Finder) / **Diagnostics** (Test Environment, Test Retrieve Data) / **Utilities** (Generate Test Data, Generate Report).
+- **Archive-destination safety check**: warns before Importer writes into a non-empty folder with no existing database, offers a one-click "create `archive` subfolder here" fix.
+- **Persistent activity log + crash detection**: 50-slot circular buffer in `gui_settings.ini`, clean-shutdown marker, crash inferred from its absence at next startup.
+- **Generate Report**: full diagnostic text dump (environment, recent activity, tool config status with resolved paths, database row counts) — designed for pasting directly when asking for debugging help.
+
+### Testing infrastructure
+- `chronovault.sh` rewritten for full containment (`chronovault_test/` folder) — cleanup is now always a safe single-folder delete, can never touch a real archive.
+- `generate_test_data.py` extended: hidden dot-folders, European-style filename dates, French accented month-name folders (surfaced and fixed a real regex bug — `[A-Za-z]+` never matched accented letters), and real zip/tar archives for testing Indexer's archive detection.
+
+### Decided, not yet built
+- **5b (archive-hash cross-check)** — elevated priority: deletion/cleanup of source originals is explicitly deferred, and this is the mechanism that makes that safe (re-scanning an un-deletable DVD repeatedly costs only time, never duplicate archive entries).
+- **Stop button** — needs `indexer.py`'s batch-commit fix first (currently one commit at the very end of a scan).
+- **Verify Status dialog** — needs a shared expected-config-keys definition that a future **`--init` flag** (regenerate a clean config, backing up the old one) will also use.
+- **DVD/optical-media identification by volume label** — logged as a future enhancement, platform-specific work.
+- Confirmed directly: Python 3.12's `Path.rglob()` does not follow symlinks into directories at all (no loop risk today, but silently skips legitimate symlinked content) — a `follow_symlinks` opt-in flag is the likely future fix.
+
+### Process
+- Project's GitHub integration confirmed connected; **"Sync now"** replaces manual delete-and-reupload for keeping Claude's project knowledge current.
+- This handoff file is now updated via **short weekly devnote entries appended to the end** — not full rewrites — starting with this one.
