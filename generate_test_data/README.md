@@ -22,6 +22,7 @@ python3 generate_test_data/generate_test_data.py --seed 42
 | `--euro-date-samples` | `3` | How many filename-only, day-first (European-style) date files, no EXIF at all. |
 | `--hidden-samples` | `5` | How many files placed in **each** dot-prefixed hidden folder (there are 2 such folders — see below). |
 | `--french-month-samples` | `3` | How many filename-only, no-EXIF files placed inside a French month-name folder (`Old_Backup_1/février 2022`). |
+| `--classification-samples` | `1` | How many copies of each media-classification fixture family to generate; `0` omits these fixtures. |
 | `--seed` | *(random)* | Pass a number for a reproducible run. |
 
 ## Scenarios Generated
@@ -58,9 +59,22 @@ python3 generate_test_data/generate_test_data.py --seed 42
 
 **Plus:** duplicate sets (`match` files copied byte-for-byte into 3 backup folders) and junk `.mp4` files (garbage bytes, exercises Importer's unreadable-file handling).
 
+### Media-classification fixtures
+
+Each `--classification-samples` copy adds explicit cases for `classify_media`, rather than relying on the deliberately tiny date-analysis JPEGs:
+
+| Fixture family | Files included | Why it exists |
+|---|---|---|
+| Personal-photo positives | Full-size camera-EXIF JPEG, small EXIF-retaining shared copy, metadata-stripped full-size export | Ensures EXIF, camera filenames, dimensions, and stripped photos are weighed together conservatively. |
+| Scans | 300-DPI color TIFF and 300-DPI grayscale TIFF | A scan has no camera EXIF but is still personal media worth archiving. |
+| Clear web assets | 64×64 palette favicon, palette GIF logo, transparent button overlay under web-like paths | Expected strong negatives for the web/graphic classifier. |
+| Ambiguous and unusual inputs | Medium grayscale BMP, CMYK JPEG, PNG bytes saved with a `.jpg` extension, JPEG-formatted `.thm`, truncated JPEG | Confirms nonstandard or corrupt input is classified safely rather than crashing. |
+
+These files live under `Classification/`, visibly separate from the date-analysis scenarios. The generated default dataset therefore exercises both kinds of work: fast, tiny JPEGs for date scoring and a small number of realistic larger files for media classification.
+
 ### Totals
 
-With all defaults (`--count 256`, `--duplicate-sets 5`, `--junk-videos 5`, `--metadata-samples 3`, `--euro-date-samples 3`, `--hidden-samples 5`, `--french-month-samples 3`): 256 base + 15 duplicate copies + 5 junk + 21 (7 metadata scenarios × 3) + 3 (euro_date) + 10 (hidden, 5 × 2 folders) + 3 (french_month) + 2 (archives) = **315 files total**. `--count` only ever scales the 4 base categories — everything else is a fixed multiple of its own sample-count argument (`archives` is always exactly 2, not currently configurable via a CLI flag).
+With all defaults (`--count 256`, `--duplicate-sets 5`, `--junk-videos 5`, `--metadata-samples 3`, `--euro-date-samples 3`, `--hidden-samples 5`, `--french-month-samples 3`, `--classification-samples 1`): 256 base + 15 duplicate copies + 5 junk + 21 (7 metadata scenarios × 3) + 3 (euro_date) + 10 (hidden, 5 × 2 folders) + 3 (french_month) + 13 classification fixtures + 2 (archives) = **328 files total**. `--count` only ever scales the 4 base categories — everything else is a fixed multiple of its own sample-count argument (`archives` is always exactly 2, not currently configurable via a CLI flag).
 
 ## How EXIF (and XMP) Are Written
 
@@ -80,5 +94,5 @@ The output folder is meant to be thrown away and rebuilt on demand — not commi
 
 ## Known Gaps / Future Additions
 
-- **TIFF, BMP, RAW-stub, and THM sidecar scenarios** were previously documented here but don't currently exist in the code — worth deciding whether to actually build them or leave this script focused on JPEG-family scenarios only.
-- **French-language month-name folders** (e.g. `mars 2024`), to exercise `analyze_folder.py`'s planned French `MONTH_NAMES` support once that's built — tracked in `roadmap.md`, not yet added here.
+- **RAW-camera scenarios** (CR2/ARW/DNG) still need real fixture files or a format-aware test strategy; empty files with a raw extension would only test error handling, not metadata extraction.
+- **Valid MP4/MOV fixtures** are intentionally deferred. The existing junk-video files cover corrupt-input handling only; future video-date/classification work needs genuine containers with known metadata.

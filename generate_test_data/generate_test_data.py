@@ -146,6 +146,11 @@ def parse_args():
              "French MONTH_NAMES support (default: 3)"
     )
     parser.add_argument(
+        "--classification-samples", type=int, default=1,
+        help="How many copies of each classification fixture family to generate "
+             "(default: 1; use 0 to omit them)"
+    )
+    parser.add_argument(
         "--seed", type=int, default=None,
         help="Random seed for a reproducible run (default: random each time)"
     )
@@ -300,9 +305,15 @@ def build_xmp_packet(create_date=None, modify_date=None):
     return packet.encode('utf-8')
 
 
-def make_image(path, exif_date=None, gps_date=None, xmp_create_date=None, xmp_modify_date=None):
+def make_image(path, exif_date=None, gps_date=None, xmp_create_date=None, xmp_modify_date=None,
+               size=(20, 20), image_mode="RGB", dpi=None, photographic=False, image_format=None,
+               camera_info=None):
     """
-    Create a tiny JPEG at `path`. exif_date, if given, is written as
+    Create an image at `path`. The default remains a tiny JPEG because the
+    original date-analysis fixtures need to stay fast. Classification fixtures
+    opt into realistic dimensions, formats, DPI, and color modes below.
+
+    exif_date, if given, is written as
     DateTimeOriginal (plus a random camera make/model). gps_date, if
     given, is written as GPSDateStamp/GPSTimeStamp. xmp_create_date and
     xmp_modify_date, if given, are written into an XMP packet. Any/all of
@@ -310,12 +321,23 @@ def make_image(path, exif_date=None, gps_date=None, xmp_create_date=None, xmp_mo
     metadata at all.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    img = Image.new('RGB', (20, 20), color=random_color())
+    if photographic:
+        # Noise is compact enough for a test fixture but avoids a flat,
+        # single-color image being mistaken for a web icon by classification.
+        noise = Image.effect_noise(size, 90)
+        img = Image.merge('RGB', (noise, noise.point(lambda value: (value * 3) % 256),
+                                  noise.point(lambda value: (value * 7) % 256)))
+    elif image_mode == 'CMYK':
+        img = Image.new(image_mode, size, color=(*random_color(), 0))
+    elif image_mode == 'RGBA':
+        img = Image.new(image_mode, size, color=(*random_color(), 128))
+    else:
+        img = Image.new(image_mode, size, color=random_color() if image_mode == 'RGB' else 128)
 
     save_kwargs = {}
 
     if exif_date is not None or gps_date is not None:
-        make, model = pick_camera()
+        make, model = camera_info if camera_info is not None else pick_camera()
         save_kwargs["exif"] = build_exif_bytes(
             date_str=exif_date.strftime("%Y:%m:%d %H:%M:%S") if exif_date else None,
             make=make,
@@ -327,7 +349,13 @@ def make_image(path, exif_date=None, gps_date=None, xmp_create_date=None, xmp_mo
     if xmp_create_date is not None or xmp_modify_date is not None:
         save_kwargs["xmp"] = build_xmp_packet(create_date=xmp_create_date, modify_date=xmp_modify_date)
 
-    img.save(path, "jpeg", **save_kwargs)
+    if dpi:
+        save_kwargs["dpi"] = dpi
+    format_by_extension = {
+        '.jpg': 'jpeg', '.jpeg': 'jpeg', '.thm': 'jpeg', '.png': 'png',
+        '.bmp': 'bmp', '.tif': 'tiff', '.tiff': 'tiff', '.gif': 'gif', '.webp': 'webp',
+    }
+    img.save(path, image_format or format_by_extension.get(path.suffix.lower(), 'jpeg'), **save_kwargs)
 
 
 def make_junk_video(path):
@@ -396,8 +424,75 @@ def generate_category(root, category, filename_prefix, count, kwargs_fn):
         kwargs = kwargs_fn() if kwargs_fn else {}
         make_image(path, **(kwargs or {}))
         created.append(path)
-    print(f"  {category:14s} {count:4d} file(s) -> e.g. {created[0].relative_to(root)}")
+    example = created[0].relative_to(root) if created else "none requested"
+    print(f"  {category:14s} {count:4d} file(s) -> e.g. {example}")
     return created
+
+
+def print_fixture_summary(category, files, root):
+    """Print a safe summary even when an option deliberately requested zero files."""
+    example = files[0].relative_to(root) if files else "none requested"
+    print(f"  {category:14s} {len(files):4d} file(s) -> e.g. {example}")
+
+
+def make_classification_fixtures(root, now, copies):
+    """Generate explicit image-classification cases, separate from date tests."""
+    files = []
+    for index in range(1, copies + 1):
+        suffix = f"_{index:02d}"
+
+        # Personal-photo positives: normal camera original, resized sharing
+        # copy, and a metadata-stripped but still photo-sized export.
+        camera = root / "Classification" / "Camera Originals" / f"IMG_20240115_120000{suffix}.jpg"
+        make_image(camera, exif_date=now - timedelta(days=30), size=(2000, 1500), photographic=True,
+                   camera_info=("Canon", "EOS 90D"))
+        files.append(camera)
+        resized = root / "Classification" / "Shared" / f"IMG_resized{suffix}.jpg"
+        make_image(resized, exif_date=now - timedelta(days=30), size=(128, 96), photographic=True,
+                   camera_info=("Canon", "EOS 90D"))
+        files.append(resized)
+        stripped = root / "Classification" / "Stripped Exports" / f"holiday_export{suffix}.jpg"
+        make_image(stripped, size=(1800, 1200), photographic=True)
+        files.append(stripped)
+
+        # Scans are valid personal images despite normally lacking camera EXIF.
+        scan = root / "Classification" / "Scans" / f"family_photo_scan{suffix}.tiff"
+        make_image(scan, size=(2000, 1500), dpi=(300, 300), photographic=True)
+        files.append(scan)
+        grayscale_scan = root / "Classification" / "Scans" / f"letter_scan{suffix}.tif"
+        make_image(grayscale_scan, size=(1700, 2200), image_mode='L', dpi=(300, 300))
+        files.append(grayscale_scan)
+
+        # Clear negatives: tiny/palette assets and deliberately web-like paths.
+        favicon = root / "Classification" / "web_cache" / f"favicon{suffix}.png"
+        make_image(favicon, size=(64, 64), image_mode='P')
+        files.append(favicon)
+        logo = root / "Classification" / "web_assets" / f"logo_banner{suffix}.gif"
+        make_image(logo, size=(240, 80), image_mode='P')
+        files.append(logo)
+        button = root / "Classification" / "web_assets" / f"button_overlay{suffix}.png"
+        make_image(button, size=(160, 48), image_mode='RGBA')
+        files.append(button)
+
+        # Ambiguous/nonstandard inputs must be inspected safely, never crash.
+        ambiguous = root / "Classification" / "Ambiguous" / f"medium_graphic{suffix}.bmp"
+        make_image(ambiguous, size=(640, 480), image_mode='L')
+        files.append(ambiguous)
+        cmyk = root / "Classification" / "Unusual Formats" / f"print_export{suffix}.jpg"
+        make_image(cmyk, size=(900, 600), image_mode='CMYK')
+        files.append(cmyk)
+        mislabeled = root / "Classification" / "Unusual Formats" / f"actually_png{suffix}.jpg"
+        make_image(mislabeled, size=(800, 600), photographic=True, image_format='png')
+        files.append(mislabeled)
+        thm = root / "Classification" / "Unusual Formats" / f"camera_sidecar{suffix}.thm"
+        make_image(thm, exif_date=now - timedelta(days=30), size=(320, 240), photographic=True)
+        files.append(thm)
+        corrupt = root / "Classification" / "Broken Files" / f"truncated_photo{suffix}.jpg"
+        corrupt.parent.mkdir(parents=True, exist_ok=True)
+        corrupt.write_bytes(b'\xff\xd8\xff\xe0not a complete jpeg')
+        files.append(corrupt)
+
+    return files
 
 
 def main():
@@ -522,7 +617,7 @@ def main():
         path = folder / filename
         make_image(path)  # no exif/gps/xmp at all -- filename is the only real evidence
         euro_date_files.append(path)
-    print(f"  {'euro_date':14s} {args.euro_date_samples:4d} file(s) -> e.g. {euro_date_files[0].relative_to(root)}")
+    print_fixture_summary('euro_date', euro_date_files, root)
 
     # Hidden-folder scenario -- see HIDDEN_FOLDERS above for why there are
     # two distinct placements rather than one.
@@ -533,8 +628,11 @@ def main():
             path = hidden_dir / f"hidden_{i:04d}.jpg"
             make_image(path, exif_date=now - timedelta(minutes=random.randint(0, 30)))
             hidden_files.append(path)
-    print(f"  {'hidden':14s} {len(hidden_files):4d} file(s) -> across {len(HIDDEN_FOLDERS)} "
-          f"dot-prefixed folder(s), e.g. {hidden_files[0].relative_to(root)}")
+    if hidden_files:
+        print(f"  {'hidden':14s} {len(hidden_files):4d} file(s) -> across {len(HIDDEN_FOLDERS)} "
+              f"dot-prefixed folder(s), e.g. {hidden_files[0].relative_to(root)}")
+    else:
+        print(f"  {'hidden':14s} {0:4d} file(s) -> none requested")
 
     # French month-name folder scenario -- deliberately NO EXIF at all, so
     # the folder path is the ONLY real signal (aside from the much-weaker
@@ -550,8 +648,14 @@ def main():
         path = french_month_dir / f"french_{i:04d}.jpg"
         make_image(path)  # no exif/gps/xmp at all -- the folder name is the only real evidence
         french_month_files.append(path)
-    print(f"  {'french_month':14s} {args.french_month_samples:4d} file(s) -> "
-          f"{french_month_dir.relative_to(root)}/")
+    if french_month_files:
+        print(f"  {'french_month':14s} {args.french_month_samples:4d} file(s) -> "
+              f"{french_month_dir.relative_to(root)}/")
+    else:
+        print(f"  {'french_month':14s} {0:4d} file(s) -> none requested")
+
+    classification_files = make_classification_fixtures(root, now, args.classification_samples)
+    print_fixture_summary('classification', classification_files, root)
 
     # Real ZIP and TAR.GZ archives, built from already-generated 'match'
     # files -- gives Indexer's archive detection and opt-in content-listing
@@ -584,7 +688,7 @@ def main():
 
     total = (n_match + n_mismatch + n_no_exif + n_implausible + dup_count + args.junk_videos
              + n * 7 + args.euro_date_samples + len(HIDDEN_FOLDERS) * args.hidden_samples
-             + args.french_month_samples + 2)
+             + args.french_month_samples + len(classification_files) + 2)
     print("-" * 60)
     print(f"Total files generated: {total}")
     print()
@@ -625,4 +729,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
