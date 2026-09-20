@@ -16,11 +16,15 @@ The current pipeline:
 
 1. **Indexer** — Recursively scans a starting folder for matching file types and logs everything into a database. Non-destructive, purely additive, safe to run against multiple locations.
 
-2. **Importer** — Copies matching files into the archive, organized as `archive/YYYY/MM/DD/`, using `analyze_date` (see below) to decide the date and how confident to be in it. Files it isn't confident about go to `archive/_review_needed/` instead of a guessed folder.
+2. **Classify Media** — Conservatively weeds out only clear web/graphic assets before they are hashed. Personal camera photos, scans, and ambiguous images remain eligible; the classification result and its evidence stay in the inventory database.
 
-3. **Audit Archive** — Read-only reconciliation: compares the archive folder on disk against the database, reporting anything undocumented, missing, or misplaced. Never modifies anything.
+3. **Condition Database** — Hashes eligible files, determines dates, and marks identical source copies before import.
 
-4. **Duplicate Finder** — Hashes files and groups identical content together, so you can see true duplicates and how much space could be reclaimed.
+4. **Importer** — Copies matching files into the archive, organized as `archive/YYYY/MM/DD/`, using the precomputed date evidence. Files it isn't confident about go to `archive/_review_needed/` instead of a guessed folder.
+
+5. **Audit Archive** — Read-only reconciliation: compares the archive folder on disk against the database, reporting anything undocumented, missing, or misplaced. Never modifies anything.
+
+6. **Duplicate Finder** — Hashes files and groups identical content together, so you can see true duplicates and how much space could be reclaimed.
 
 5. **`retrieve_data` / `write_data`** — The review workflow for anything sitting in `_review_needed/`. `retrieve_data` is a UI-agnostic, read-only data layer (usable from a terminal script, a future desktop app, or a future web app — nothing about it assumes which); `write_data` applies a person's corrected date, physically moving the file and updating the database, while deliberately preserving the *original* algorithmic evidence rather than overwriting it.
 
@@ -47,7 +51,7 @@ Multiple sources agreeing pushes confidence up; disagreement pulls it down. File
 
 ### Testing Without Real Photos
 
-`generate_test_data/generate_test_data.py` generates a realistic, messy folder tree of small fake files covering every confidence scenario across every currently-supported format (JPEG with EXIF/GPS/XMP variations, TIFF, BMP, a RAW approximation, THM sidecars) plus deliberate duplicates and unreadable junk files — useful for trying out any tool, or testing a change, without risking real photos.
+`generate_test_data/generate_test_data.py` generates a realistic, messy folder tree of fast date-analysis JPEGs plus larger media-classification fixtures: camera originals, stripped exports, high-DPI TIFF scans, BMP/GIF/PNG/THM cases, web assets, and safely-handled corrupt files. It also includes deliberate duplicates and unreadable junk-video files — useful for trying out any tool, or testing a change, without risking real photos.
 
 ## Project Status
 
@@ -109,7 +113,7 @@ ChronoVault/
 
 ## Getting Started
 
-Run `python3 test_functions/test_env.py` first to confirm your environment has everything installed. Then run `./chronovault.sh` from the project root for a step-by-step menu (cleanup, generate test data, index, import, audit, find duplicates), or run any tool directly. See the README inside each tool's subfolder for exact usage.
+Run `python3 test_functions/test_env.py` first to confirm your environment has everything installed. Then run `./chronovault.sh` from the project root for a step-by-step menu (cleanup, generate test data, index, classify media, condition, import, audit, find duplicates), or run any tool directly. See the README inside each tool's subfolder for exact usage.
 
 Want to try things out without using real photos? `chronovault.sh` option 2 generates a sample folder tree for you.
 

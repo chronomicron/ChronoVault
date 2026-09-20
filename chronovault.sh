@@ -32,17 +32,18 @@ show_menu() {
     echo "[1]  Cleanup Test Environment (delete everything in $TEST_ROOT/)"
     echo "[2]  Generate Test Data"
     echo "[3]  Indexer"
-    echo "[4]  Condition Database (hash + date + mark duplicates, before import)"
-    echo "[5]  Importer"
-    echo "[6]  Audit Archive"
-    echo "[7]  Duplicate Finder"
+    echo "[4]  Classify Media (weed out certain web/graphic assets)"
+    echo "[5]  Condition Database (hash + date + mark duplicates, before import)"
+    echo "[6]  Importer"
+    echo "[7]  Audit Archive"
+    echo "[8]  Duplicate Finder"
     echo ""
     echo "-- Module Tests (test_functions/) --"
-    echo "[8]  Test Environment (dependency check)"
-    echo "[9]  Test Retrieve Data (review-bucket read layer)"
-    echo "[10] Test Write Data (apply a correction + before/after Audit diff)"
-    echo "[11] Test Analyze Date (single file, choose path + options)"
-    echo "[12] Test OCR Date (needs real photos placed in $TEST_ROOT/OCR_test_images/)"
+    echo "[9]  Test Environment (dependency check)"
+    echo "[10] Test Retrieve Data (review-bucket read layer)"
+    echo "[11] Test Write Data (apply a correction + before/after Audit diff)"
+    echo "[12] Test Analyze Date (single file, choose path + options)"
+    echo "[13] Test OCR Date (needs real photos placed in $TEST_ROOT/OCR_test_images/)"
     echo ""
     echo "[0]  Exit"
     echo ""
@@ -95,6 +96,11 @@ condition_database_step() {
     (cd "$TEST_ROOT" && python3 "../condition_database/condition_database.py" "../condition_database/config.json")
 }
 
+classify_media_step() {
+    ensure_test_root
+    (cd "$TEST_ROOT" && python3 "../classify_media/classify_media.py" "../classify_media/config.json")
+}
+
 importer_step() {
     ensure_test_root
     (cd "$TEST_ROOT" && python3 "../importer/importer.py" "../importer/config.json")
@@ -131,7 +137,7 @@ test_retrieve_data_step() {
 test_write_data_step() {
     ensure_test_root
     if [ ! -f "$TEST_ROOT/audit_result.json" ]; then
-        echo "No audit_result.json found in $TEST_ROOT/ yet -- run Audit Archive (option 6) at least once first."
+        echo "No audit_result.json found in $TEST_ROOT/ yet -- run Audit Archive (option 7) at least once first."
         return
     fi
     (cd "$TEST_ROOT" && python3 "../test_functions/test_write_data.py")
@@ -173,15 +179,16 @@ while true; do
         1) cleanup_environment ;;
         2) generate_test_data_step ;;
         3) indexer_step ;;
-        4) condition_database_step ;;
-        5) importer_step ;;
-        6) audit_step ;;
-        7) duplicate_finder_step ;;
-        8) test_env_step ;;
-        9) test_retrieve_data_step ;;
-        10) test_write_data_step ;;
-        11) test_analyze_date_step ;;
-        12) test_ocr_date_step ;;
+        4) classify_media_step ;;
+        5) condition_database_step ;;
+        6) importer_step ;;
+        7) audit_step ;;
+        8) duplicate_finder_step ;;
+        9) test_env_step ;;
+        10) test_retrieve_data_step ;;
+        11) test_write_data_step ;;
+        12) test_analyze_date_step ;;
+        13) test_ocr_date_step ;;
         0) echo "Goodbye!"; exit 0 ;;
         *) echo "Invalid option." ;;
     esac

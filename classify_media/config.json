@@ -1,0 +1,7 @@
+{
+    "database_path": "located_files.db",
+    "output_report_path": "classification_report.json",
+    "image_extensions": ["jpg", "jpeg", "bmp", "tif", "tiff", "png", "gif", "webp", "thm"],
+    "exclude_categories": ["certain_not"],
+    "force_reclassify": false
+}

@@ -3,6 +3,13 @@
     "extensions": [
         "jpg",
         "jpeg",
+        "bmp",
+        "tif",
+        "tiff",
+        "png",
+        "gif",
+        "webp",
+        "thm",
         "mp4",
         "mov",
         "raw",

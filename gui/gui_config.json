@@ -4,6 +4,10 @@
             "script": "indexer/indexer.py",
             "config": "indexer/config.json"
         },
+        "classify_media": {
+            "script": "classify_media/classify_media.py",
+            "config": "classify_media/config.json"
+        },
         "importer": {
             "script": "importer/importer.py",
             "config": "importer/config.json"

@@ -144,6 +144,10 @@ class ChronoVaultWindow(QMainWindow):
 
         right_layout.addWidget(QLabel("Tools"))
 
+        self.classify_button = QPushButton("Classify Media")
+        self.classify_button.clicked.connect(self._run_classify_media)
+        right_layout.addWidget(self.classify_button)
+
         self.condition_button = QPushButton("Condition Database")
         self.condition_button.clicked.connect(self._run_condition_database)
         right_layout.addWidget(self.condition_button)
@@ -252,7 +256,7 @@ class ChronoVaultWindow(QMainWindow):
         Python, never touches self.process, and is meant to work even
         while another tool is mid-run.
         """
-        for button in (self.index_button, self.import_button, self.condition_button,
+        for button in (self.index_button, self.import_button, self.classify_button, self.condition_button,
                        self.audit_button, self.duplicate_button, self.test_env_button,
                        self.test_retrieve_button, self.generate_test_data_button):
             button.setEnabled(not running)
@@ -428,6 +432,14 @@ class ChronoVaultWindow(QMainWindow):
             return
         tool = self.gui_config['tools']['condition_database']
         self._launch_tool("Condition Database", tool['script'], [tool['config']])
+
+    def _run_classify_media(self):
+        """Run the conservative pre-hash image classifier against located_files.db."""
+        if 'classify_media' not in self.gui_config.get('tools', {}):
+            QMessageBox.critical(self, "Not configured", "No 'classify_media' entry found in gui_config.json.")
+            return
+        tool = self.gui_config['tools']['classify_media']
+        self._launch_tool("Classify Media", tool['script'], [tool['config']])
 
     def _run_audit_archive(self):
         """
@@ -659,4 +671,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
