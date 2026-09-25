@@ -182,12 +182,25 @@ def find_files_and_archives(root_path, media_extensions, archive_extensions):
     per concern, matters in practice: the real use case here is scanning
     an old hard drive, potentially a large one, so walking it twice would
     double a cost that's already significant.
+
+    Returns (matching_files, archive_files, interrupted, interruption_reason).
+    interrupted is True if the walk didn't finish (an I/O error partway
+    through -- a disconnected drive, a failing sector, permissions
+    changing mid-scan). Whatever was found BEFORE the interruption is
+    still returned, not discarded -- combined with store_files()'s
+    batched commits, this means an interrupted scan still saves
+    everything it found up to that point, rather than losing the whole
+    run. Only a missing/non-directory root path is still a hard,
+    immediate exit -- there's nothing partial to salvage from a search
+    path that was never valid to begin with.
     """
     media_ext_set = normalize_extensions(media_extensions)
     archive_ext_set = normalize_extensions(archive_extensions)
 
     matching_files = []
     archive_files = []
+    interrupted = False
+    interruption_reason = None
 
     root = Path(root_path)
     if not root.exists():
@@ -206,11 +219,22 @@ def find_files_and_archives(root_path, media_extensions, archive_extensions):
                 continue
             if matches_any_extension(file_path, media_ext_set):
                 matching_files.append(file_path)
-    except PermissionError as e:
-        print(f"Error: Permission denied accessing '{root_path}': {e}")
-        sys.exit(1)
+    except OSError as e:
+        # Broadened from PermissionError -- a disconnected drive, a
+        # failing sector, or a network share dropping mid-scan typically
+        # raise OTHER OSError subclasses (FileNotFoundError, "Input/output
+        # error", etc.), not PermissionError specifically, and those were
+        # previously left uncaught, crashing with a raw traceback instead
+        # of a clean, informative stop.
+        interrupted = True
+        interruption_reason = str(e)
+        print(f"\nWarning: Scan interrupted by an I/O error -- {e}")
+        print("This could mean a disconnected drive, a failing sector, or a permissions")
+        print("problem partway through the scan. Files found before the interruption")
+        print("are still saved -- re-run Indexer over the same path once the issue is")
+        print("resolved; already-found files won't be re-inserted.")
 
-    return matching_files, archive_files
+    return matching_files, archive_files, interrupted, interruption_reason
 
 
 COMMIT_BATCH_SIZE = 100
@@ -549,7 +573,9 @@ def main():
     conn = init_database(database_path)
     init_archive_table(conn)
 
-    files, archive_files = find_files_and_archives(root_path, extensions, archive_extensions)
+    files, archive_files, interrupted, interruption_reason = find_files_and_archives(
+        root_path, extensions, archive_extensions
+    )
     print(f"Found {len(files)} matching media file(s) on disk.")
     print(f"Found {len(archive_files)} archive file(s) on disk.")
 
@@ -581,6 +607,20 @@ def main():
                   f"their locations are saved, so turning this on later will pick them up "
                   f"without needing to rescan {root_path}")
 
+    if interrupted:
+        print()
+        print("=" * 60)
+        print(f"WARNING: The scan was interrupted before completing -- {interruption_reason}")
+        print(f"Everything found up to that point has been saved (see counts above).")
+        print(f"Re-run Indexer over the same path once the issue is resolved -- already-")
+        print(f"found files won't be re-inserted, so this just picks up where it left off.")
+        print("=" * 60)
+        # Exit non-zero (not a raised exception) so a GUI or script can tell
+        # "finished, but something went wrong" apart from a clean run --
+        # without this looking like a crash, which it genuinely isn't.
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
+    
