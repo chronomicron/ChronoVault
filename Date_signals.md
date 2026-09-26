@@ -1,348 +1,138 @@
-# ChronoVault — Date Signals Catalog
+# ChronoVault Date Signals
 
-A reference for every practical way ChronoVault can (or could) determine when media was created or recorded. This document packages research and design notes for future work on `analyze_date` and related extractors. It is **not** a claim that all of these are implemented yet.
+This document separates the date evidence ChronoVault uses today from possible future sources. The implementation in `analyze_date/` is authoritative for current behavior; the later research catalog is planning material only.
 
-**Related code / docs:**
+ChronoVault's design is evidence-in, scored-result-out: small extractors produce named candidate dates, `analyze_date()` chooses and scores a result, and callers decide what to do with low-confidence output. The date analyzer does not copy, move, rename, or update files or databases.
 
-- `analyze_date/` — confidence-scored combination of signals (implemented)
-- `ocr_date/` — corner-stamp OCR proof of concept (not wired in)
-- `Database_schema.md` — how chosen dates are stored on archive rows
-- `README.md` — pipeline overview and roadmap
+## Current implementation
 
-**Design rule (unchanged):** extract candidate datetimes as named signals → hand them to `analyze_date` → get back a scored, explained answer. Prefer **capture time** over **encode/export time** over **tag-edit time** over **filesystem time**. Low confidence still goes to `archive/_review_needed/`.
+### API and dispatch
 
----
+`analyze_date(evidence)` accepts:
 
-## 1. Big picture: where dates live
+| Key | Required | Default | Meaning |
+|---|---:|---|---|
+| `file_path` | yes | none | File to inspect. |
+| `readable_exif` | no | `{}` | EXIF mapping already read by the caller. |
+| `mismatch_threshold_days` | no | `1` | Maximum integer-day difference counted as agreement. |
+| `file_type` | no | file suffix | Optional dispatch override such as `.tiff`. |
+| `try_ocr` | no | `false` | Enables slow OCR for supported image types. |
 
-| Layer | Examples | Typical trust |
-|-------|----------|---------------|
-| **Camera / capture metadata** | EXIF DateTimeOriginal, GPS timestamp, QuickTime `creation_time` | High |
-| **Editor / workflow metadata** | XMP CreateDate / DateTimeOriginal, IPTC, Photoshop IRB | Medium–high (sometimes “when edited”) |
-| **Container headers** | MP4 `mvhd`, MKV `DateUTC`, MP3 ID3 `TDRC` | Medium (often encode/export time) |
-| **Sidecars / companions** | `.xmp`, Google Takeout JSON, `.THM` | High when clearly present and matched |
-| **Filename / path** | `IMG_20240115_…`, `Meeting 2024-03-12.mp3` | Medium (excellent when embedded metadata is empty) |
-| **Filesystem** | ctime / mtime / birthtime | Low on Linux (inode change ≠ creation) |
-| **Content inference** | visual year guess, ASR “today is Monday” | Low / experimental — suggestions only, never auto-file |
+The return mapping contains `date_taken`, `date_source`, `filesystem_creation_date`, `confidence`, `reason`, and `date_uncertain`.
 
----
+Evidence gathering currently dispatches as follows:
 
-## 2. Currently implemented (baseline)
+- `.jpg`, `.jpeg`, and `.thm`: GPS, EXIF original/digitized, and embedded XMP.
+- `.tif` and `.tiff`: the TIFF baseline `DateTime` tag. JPEG-style EXIF/GPS/XMP extraction is not also run for TIFF.
+- JPEG-family and TIFF files: optional corner-stamp OCR when `try_ocr` is true.
+- every file type: filename, containing-folder, and filesystem signals.
+- audio and video: no format-specific metadata extractors yet; only the type-independent signals apply.
 
-As of the pipeline that uses `analyze_date`:
+Manufacturer RAW formats are not treated as TIFF. A caller that knows a file is TIFF-compatible can explicitly pass `file_type='.tiff'`.
 
-| Signal (source name) | Base confidence | Notes |
-|----------------------|:---------------:|-------|
-| `exif_gps` | 98 | Satellite-derived time from EXIF GPS block; independent of camera clock |
-| `exif_original` | 95 | EXIF `DateTimeOriginal` |
-| `exif_digitized` | 85 | EXIF `DateTimeDigitized` |
-| `filesystem_fallback` | 30 | Best-effort FS date (`st_ctime` on Linux is metadata-change time, not true birth time) |
+### Implemented sources and confidence
 
-**Combination logic (already in `analyze_date`):**
+| Source name | Base | Extraction behavior |
+|---|---:|---|
+| `exif_gps` | 98 | EXIF GPS date and time from the caller-supplied EXIF mapping. |
+| `exif_original` | 95 | EXIF `DateTimeOriginal`. |
+| `tiff_datetime` | 90 | TIFF baseline `DateTime` tag. |
+| `exif_digitized` | 85 | EXIF `DateTimeDigitized`. |
+| `xmp_create_date` | 80 | Embedded XMP `CreateDate` or Photoshop `DateCreated`. |
+| `filename_pattern` | 70 | A recognized date in the filename. |
+| `ocr_corner_stamp` | 60 | Opt-in OCR of rotated/preprocessed image corners. |
+| `path_folder_pattern` | 40 | A recognized date in a containing folder. |
+| `filesystem_fallback` | 30 | `Path.stat().st_ctime`; on Linux this is inode-change time, not birth time. |
+| `xmp_modify_date` | 20 | Embedded XMP `ModifyDate`, treated as weak edit-time evidence. |
 
-1. Collect all available signals.
-2. Pick the highest base-confidence signal as primary.
-3. Other signals within `mismatch_threshold_days` **agree** (+5 each); farther apart **disagree** (−25 each).
-4. Implausible dates (before 1972-07-26, or in the future) are capped at confidence **5**.
-5. Confidence &lt; **50** → `date_uncertain = true` → Importer routes to `_review_needed/`.
+The source names above are the complete current set that may be returned in `date_source`. Some source-code comments and docstrings still describe an older, smaller set.
 
-**Still planned as signals, not yet wired:** filename patterns, `.THM` sidecars, OCR stamps (`ocr_date/`), XMP/IPTC, audio tags, Takeout JSON, hash-twins, etc.
+### Filename and folder patterns
 
----
+Filename parsing recognizes camera-style and general numeric dates, including forms such as `IMG_20240115_123000`, `2024-01-15`, and ambiguous year-last forms. For ambiguous month/day values it tries month-day-year before day-month-year. Years must be between 1990 and the current year plus one.
 
-## 3. Images beyond JPEG
+Folder parsing searches from the immediate parent outward and recognizes:
 
-JPEG is not special — it is only where EXIF is most common. Other formats hide dates in EXIF-like IFDs, XMP packets, text chunks, or container atoms.
+- a four-digit year;
+- `YYYY-MM` and `YYYY_MM`;
+- English or French month names combined with a year.
 
-### 3.1 Format map
+It does not currently recognize every locale or date notation; for example, Japanese year/month folder names are unsupported. A nearer matching folder wins over a more distant one.
 
-| Format | Date sources | Notes for ChronoVault |
-|--------|--------------|------------------------|
-| **JPEG / JPG** | EXIF, IPTC, XMP, Photoshop IRB, GPS | EXIF + GPS already used; IPTC/XMP still untapped |
-| **TIFF / DNG** | Full EXIF IFDs, XMP | Same mental model as JPEG; often richer |
-| **RAW** (CR2, NEF, ARW, ORF, RW2, …) | Maker notes + EXIF | Pillow is weak here; prefer ExifTool / pyexiv2 / raw-aware libs |
-| **HEIC / HEIF** | EXIF + QuickTime-style metadata | Default iPhone still format — first-class candidate |
-| **WebP** | EXIF + XMP chunks | Common in web/export workflows |
-| **PNG** | `eXIf` chunk, `tEXt`/`iTXt` **Creation Time**, XMP | Screenshots/exports often lack true capture time; Creation Time is frequently *export* time |
-| **GIF / BMP / SVG** | Almost never useful capture dates | Filename / filesystem only, or skip dating ambition |
-| **JPEG XL / AVIF** | EXIF/XMP possible | Niche for a personal vault today; easy to add later |
+### Scoring
 
-### 3.2 Photoshop / Adobe “hidden” data
+1. The available signal with the highest base confidence becomes primary.
+2. Each other signal whose date is within `mismatch_threshold_days` adds 5 points.
+3. Each other signal outside that threshold subtracts 25 points.
+4. The score is clamped to 0–100.
+5. A primary date before 1972-07-26 or later than the current time is capped at 5.
+6. A result below 50 sets `date_uncertain=true`.
 
-Adobe does not invent a secret calendar. It reuses standard metadata bags that many tools already read (especially **ExifTool**):
+Agreement currently compares `abs((other - primary).days)`. Because `timedelta.days` is an integer floor rather than an exact duration, the default threshold does not behave like a precise 24-hour tolerance around the primary date. This is an implementation limitation, not an intended statistical rule.
 
-1. **XMP** (XML packet inside the file)
-   - `xmp:CreateDate`, `xmp:ModifyDate`, `xmp:MetadataDate`
-   - `photoshop:DateCreated`
-   - `exif:DateTimeOriginal` (often mirrored into XMP even when classic EXIF is messy)
-   - **Trust:** Original / DateCreated ≈ capture or digitalization; **ModifyDate ≈ last edit — do not file by ModifyDate alone**
+The primary signal is selected by base confidence, not by the adjusted final score. A strong signal can therefore remain the chosen date even after several disagreement penalties.
 
-2. **IPTC-IIM** (often inside JPEG APP13 “Photoshop 3.0” segment)
-   - Date Created / Time Created
-   - Common in news, agency, and older Lightroom-style workflows
+### Known interpretation limits
 
-3. **Photoshop IRB** (Image Resource Blocks)
-   - May hold IPTC and other resources; ExifTool flattens these
-   - Rarely better than EXIF/XMP when those already exist
+- GPS timestamps are UTC-like while ordinary EXIF dates are normally camera-local and timezone-free. The analyzer compares naive values without timezone reconciliation.
+- XMP date strings with offsets are parsed and then made naive; the value is not converted to a common timezone first.
+- The XMP reader examines XML element text. Common RDF attribute forms may not be found.
+- Filesystem `st_ctime` is a weak and platform-dependent fallback.
+- OCR requires Tesseract plus `pytesseract`, OpenCV, and NumPy. It is lazy-loaded and opt-in, but when enabled it is attempted even if stronger evidence already exists.
+- The repository's `analyze_date/config.json` is currently a draft/reference file; `analyze_date.py` does not load it.
 
-4. **PNG + Photoshop**
-   - Often XMP + text **Creation Time**; classic capture EXIF only if an `eXIf` chunk was written
+## Current consumers
 
-### 3.3 Practical still-image signal set (target)
+### Condition Database
 
-```text
-exif_gps
-exif_original
-exif_digitized
-xmp_datetime_original / xmp_create
-iptc_date_created
-png_creation_time          (lower base confidence)
-filename
-filesystem_fallback
-```
+Condition Database calls the analyzer for eligible source-inventory rows and stores `date_taken`, `date_source`, `confidence`, and `date_reason` in `located_files`. Its `try_ocr` setting is passed through for all supported image rows, not only rows already known to be uncertain.
 
----
+### Importer
 
-## 4. Audio — MP3 meetings and friends
+Importer analyzes each selected source again rather than consuming Condition Database's stored decision. It stores its result in `archive_files` and routes confidence below 50 to `_review_needed/`. Importer does not enable OCR, so a row conditioned with OCR can receive a different result during import.
 
-### 4.1 MP3: yes, headers can carry dates (ID3)
+### Other tools
 
-The MPEG audio frames themselves have **no reliable “recorded at” field**. Dates live in **ID3 tags**:
+The focused scripts under `test_functions/` exercise date and OCR behavior. Audit Archive does not call this shared analyzer; its extra-file recommendation uses a separate EXIF/filesystem heuristic, so its recommendation can differ from Importer and Condition Database.
 
-| Tag | Meaning | Usefulness for meeting recordings |
-|-----|---------|-----------------------------------|
-| **TDRC** (ID3v2.4) | Recording time | Best when present — often set by recorder apps |
-| **TDOR** | Original release / recording | Occasional |
-| **TDRL** | Release time | Usually “published”, not “when we met” |
-| **TYER** / **TDAT** / **TIME** (older v2.3) | Year / date / time | Common on older files |
-| **TDTG** | Tagging time | When tags were written — **weak** |
-| **COMM** | Comments (free text) | Sometimes “Recorded 2024-03-12…” — parse carefully |
+## Planned and researched signals
 
-**Libraries:** Python **mutagen** is the usual choice; **ExifTool** also reads ID3 well.
+Everything in this section is unimplemented unless explicitly listed in the current table above.
 
-**Caveats that matter for meetings:**
+### Still images and sidecars
 
-- Some voice-recorder / phone apps **do** write `TDRC` (or at least a year).
-- Many “Save as MP3”, WhatsApp, or Telegram exports **strip** tags and leave only filesystem + filename.
-- Re-encoding (Audacity export, cloud convert) often sets dates to **export time**, not meeting time.
-- Treat ID3 as a **medium** signal: useful, but below a clear filename like `Standup_2024-03-12.mp3`, and far below camera EXIF for photos.
+Potential high-value additions include broader TIFF/EXIF traversal, IPTC Date Created, XMP RDF attributes, HEIC/HEIF, RAW formats, WebP and PNG metadata, external `.xmp` files, `.THM` pairing, and export sidecars such as Google Takeout supplemental JSON. Sidecars should be evidence for a media item rather than automatically archived as media themselves.
 
-### 4.2 Other audio containers (often better than MP3)
+Capture-oriented fields should outrank edit/export fields. `xmp:ModifyDate`, PNG creation text, and similar workflow timestamps should remain weak unless corroborated.
 
-| Format | Where the date is | Notes |
-|--------|-------------------|--------|
-| **M4A / AAC / MP4 audio** | QuickTime `©day`, `creation_time` in `mvhd` / `tkhd` | iPhone Voice Memos, many dictation apps — often excellent |
-| **WAV** | BWF `bext.originationDate` + `originationTime`; LIST/INFO `ICRD` | Field recorders, Zoom H-series, serious mics — strong when BWF present |
-| **FLAC / OGG** | Vorbis comments `DATE`, `YEAR` | Good when tagged; free-form strings |
-| **AIFF** | Similar metadata families to WAV-ish workflows | Less common for casual meetings |
-| **WMA** | ASF creation attributes | Rare in typical Linux personal workflows |
+### Audio
 
-**For “meetings and such,” prefer this order:**
+Possible sources include:
 
-1. Filename / folder (`Meetings/2024/03/…`)
-2. M4A / WAV container dates when the recorder wrote them honestly
-3. ID3 `TDRC` on MP3
-4. Filesystem last
+| Format | Candidate metadata | Caution |
+|---|---|---|
+| MP3 | ID3 `TDRC`; older `TYER`/`TDAT`/`TIME` | Re-encoding and messaging exports often remove or rewrite tags. |
+| M4A/AAC | QuickTime `creation_time`, `©day` | May describe encoding rather than recording. |
+| WAV | BWF origination date/time; LIST/INFO `ICRD` | Strong when written by a recorder. |
+| FLAC/OGG | Vorbis `DATE`/`YEAR` | Free-form and workflow-dependent. |
 
-Also watch for **companion files** some apps drop (`.json`, `.xml`, or a matching `.wav` + `.mp3` pair).
+Filename and folder evidence is often valuable for meeting recordings. A nameless recording should not be assigned a confident calendar day from filesystem time alone.
 
-### 4.3 Suggested policy for meeting audio
+### Video
 
-```text
-if filename has a clear date     → strong signal
-elif ID3 TDRC present + plausible → medium signal
-elif parent folder looks like a date → weak signal
-else → _review_needed
-```
+Candidates include MP4/QuickTime `mvhd`/`tkhd` creation times, `©day`, `com.apple.quicktime.creationdate`, MKV `DateUTC`, and embedded GPS. Re-exported video may carry export time rather than capture time.
 
-Do **not** invent a calendar day from mtime alone for a nameless `recording.mp3` — that is exactly the failure mode `_review_needed` exists to prevent.
+### Cross-file inference
 
----
+Potential signals include an identical hash already associated with a high-confidence or user-corrected archive date, paired sidecars, and carefully constrained sequence/burst inference. Visual era estimation or speech recognition should, at most, produce review suggestions rather than automatic filing decisions.
 
-## 5. Video
+## Design guidance for future work
 
-ChronoVault already imports `mp4` / `mov`. Container dates deserve the same multi-signal treatment as photos.
+- Add format-specific evidence in a small extractor and register a distinct source name/base confidence; keep the generic combination logic stable.
+- Preserve provenance and the unadjusted evidence so a person can understand a result.
+- Normalize timezone-aware values before comparing them, without inventing a timezone for naive camera timestamps.
+- Keep slow or speculative techniques opt-in and direct weak results to review.
+- Prefer a shared analyzer for Condition Database, Importer, and audit recommendations so identical evidence produces consistent results.
+- Consider ExifTool or format-aware libraries for broad RAW, HEIC, audio, video, Adobe, and sidecar coverage rather than assuming Pillow exposes all metadata.
 
-| Source | Notes |
-|--------|--------|
-| QuickTime / MP4 `mvhd` / `tkhd` `creation_time` | Often real capture time on phone video; can be encode time after re-export |
-| `©day` / QuickTime UserData | Human-oriented date atom |
-| `com.apple.quicktime.creationdate` | Common on iPhone |
-| MKV `DateUTC` | Good when present |
-| Embedded timecode | Relative to session start — **not** a calendar date unless day-zero is known |
-| GPS in video metadata | Some phones; rare but high trust, similar to photo GPS |
-
----
-
-## 6. Sidecars and ecosystem signals
-
-In real personal libraries, exports often **strip** embedded metadata. Companions can be more trustworthy than the media file’s own headers.
-
-| Companion | What you get |
-|-----------|----------------|
-| **Google Takeout** `*.supplemental-metadata.json` (or older `*.json`) | `photoTakenTime.timestamp` — often the **best** date when social apps stripped EXIF |
-| **Apple / Photos export sidecars** | Varies; sometimes XMP |
-| **`.xmp` next to the file** (Lightroom, darktable, etc.) | Full XMP CreateDate / DateTimeOriginal |
-| **`.THM`** next to video/RAW | Mini-JPEG with EXIF (already on the roadmap) |
-| **NAS / phone backup folder names** | e.g. `DCIM/Camera/2024/…` as a weak path signal |
-| **Email / chat export context** | Usually out of scope unless parsing a known export format |
-
-**Important:** index sidecars as **evidence for a media file**, not as first-class archive photos. Do not file Takeout JSON into `YYYY/MM/DD/` as if it were an image.
-
-**Google Takeout JSON** deserves its own signal name (e.g. `takeout_json`) with **high** base confidence when the JSON is clearly paired with the media file.
-
----
-
-## 7. Non-header approaches (still valid signals)
-
-None of these replace metadata; they help the residual pile in `_review_needed`.
-
-| Idea | How it helps | Risk |
-|------|--------------|------|
-| **Burst / sequence clustering** | Neighbor `IMG_0042` has solid EXIF → infer nearby files | Wrong if the folder is a mixed multi-year dump |
-| **Same device + sequential numbers** | Camera `IMG_####` monotonic within a day | Breaks after renumber/export |
-| **Hash twin already dated** | Identical bytes already archived with high confidence | Excellent — Duplicate Finder + archive DB almost enable this |
-| **Folder name as signal** | ` magia/Italy 2019/` | Medium; false positives (`Scan 2019 of 1995 prints`) |
-| **OCR date stamp** | Printed corner dates (`ocr_date/`) | Opt-in only; treat as candidate |
-| **Audio ASR “today is March 12”** | Rarely said in meetings | Research curiosity — do not auto-file |
-| **Visual year estimation (ML)** | Guess era from cars/UI chrome | Too wrong for an archive of record |
-
-**Hash-twin → known date** is especially ChronoVault-native: if Importer sees a SHA-256 already in `archive_files` with high confidence (or a user correction), that date beats filesystem noise.
-
----
-
-## 8. Suggested confidence tiers (for future `BASE_CONFIDENCE`)
-
-Rough ordering aligned with ChronoVault’s philosophy. Numbers are design guidance, not yet all coded.
-
-| Source | Suggested base | Comment |
-|--------|:--------------:|---------|
-| EXIF GPS timestamp | 98 | Implemented |
-| Matched Takeout / sidecar capture time | 96–98 | When clearly “photo taken” |
-| EXIF DateTimeOriginal | 95 | Implemented |
-| HEIC / phone MP4 capture creation | 90–95 | If not obviously an export toolchain |
-| XMP DateTimeOriginal / `photoshop:DateCreated` | 88–92 | |
-| IPTC Date Created | 85–90 | |
-| EXIF Digitized | 85 | Implemented |
-| WAV BWF origination | 80–90 | Field recorders |
-| M4A / MP4 `©day` / mvhd (audio or video) | 70–90 | App-dependent |
-| Filename with clear ISO-like date | 70–80 | Strong for meetings |
-| ID3 TDRC | 60–75 | Meetings; verify per recorder app |
-| PNG Creation Time / weak XMP CreateDate | 40–55 | Often export time |
-| ID3 TDTG / `xmp:ModifyDate` alone | 25–40 | Weak |
-| Filesystem | 30 | Implemented |
-| OCR stamp | 40–60 | Candidate only; person should glance |
-| Any implausible date | cap **5** | Implemented |
-
-Agreement / mismatch adjustments (+5 / −25 per signal) already in `analyze_date` remain the right combination model: filename `2024-03-12` agreeing with ID3 `TDRC` should beat either alone.
-
----
-
-## 9. Extensions to consider for Indexer / Importer
-
-**Current-ish focus:** `jpg`, `jpeg`, `mp4`, `mov`, plus some RAW extensions in indexer config.
-
-**High-value expansions:**
-
-```text
-Images:  heic, heif, tiff, tif, webp, png, dng, cr2, arw, nef, …
-Audio:   mp3, m4a, wav, flac, aac, ogg
-Video:   m4v, avi, mkv, 3gp, webm
-Sidecar: thm, xmp, json   (companions / evidence — not always “archive media”)
-```
-
-Filters and confidence policy should stay **config-driven** (same spirit as Importer’s size/path/EXIF filters).
-
----
-
-## 10. Architecture sketch (still modular)
-
-Keep extraction separate from scoring:
-
-| Concern | Home |
-|---------|------|
-| “Read whatever dates this file type exposes” | Small extractor layer, e.g. evidence bundle builder used by Importer (and later enrich tools) |
-| “Combine and score” | Existing `analyze_date` — append signals, do not special-case each format in the scorer |
-| Audio tags (MP3/M4A/WAV/FLAC) | `mutagen` and/or ExifTool |
-| Broad image/RAW/Adobe/phone coverage | **ExifTool** (CLI → JSON) is the pragmatic Swiss Army knife; pure Python will lag forever on edge formats |
-| OCR stamps | Existing `ocr_date/` — opt-in only on low-confidence / review-bucket files |
-| Manual override | Existing `write_data.apply_date_correction()` — preserves original algorithmic fields |
-
-Personal-archive volumes are usually fine with one ExifTool invocation per file. Premature micro-optimization is unnecessary.
-
-**Example future evidence bundle shape:**
-
-```python
-{
-    "file_path": "...",
-    "readable_exif": {...},          # existing
-    "signals": [                     # or gathered inside analyze_date
-        {"source": "filename_pattern", "date": "...", ...},
-        {"source": "id3_tdrc", "date": "...", ...},
-        {"source": "takeout_json", "date": "...", ...},
-    ],
-    "mismatch_threshold_days": 1,
-}
-```
-
-Adding a source = one `BASE_CONFIDENCE` entry + one gather path. Scorer stays stable.
-
----
-
-## 11. Implementation priority (signals only)
-
-### Tier 1 — high payoff, fits current design
-
-1. **Filename / path date parsing** (photos *and* mp3 / wav / m4a)
-2. **XMP + IPTC** on JPEG / TIFF / PNG / WebP
-3. **HEIC** and proper **MP4/MOV** container creation dates
-4. **Hash-twin already in archive** (reuse known good / user-corrected date)
-
-### Tier 2 — format expansion
-
-5. **ID3** (mp3), **Vorbis** (flac/ogg), **BWF** (wav), **M4A** atoms
-6. **Google Takeout JSON** sidecars
-7. **`.xmp` / `.THM`** companions
-8. **PNG `eXIf` + Creation Time** (low confidence)
-
-### Tier 3 — residual / opt-in
-
-9. **OCR stamps** (module exists; wire as deliberate enrich step)
-10. **Burst / sequence inference**
-11. **ML / ASR content guesses** — UI suggestions only, never auto-file
-
-### Explicit non-goals (for auto-filing)
-
-- Trusting `ModifyDate` / tagging time alone
-- Filing nameless recordings from filesystem mtime
-- Running OCR on every import
-- Auto-deleting duplicates or auto-picking winners without a person
-
----
-
-## 12. Optional follow-on product pieces (context)
-
-These are not “signals,” but they are how signals become useful:
-
-| Piece | Role |
-|-------|------|
-| **Enrich uncertain dates** tool | Only touches `_review_needed`; tries filename → optional OCR → re-score |
-| **Terminal or GUI review** | Uses `retrieve_data` + `write_data` |
-| **Hash-at-import skip** | Don’t grow the archive with identical bytes |
-| **Duplicate “pick winner”** | When same hash sits in two date folders |
-| **Apply audit fixes** | Act on Audit Archive JSON (dry-run first) |
-
----
-
-## 13. Bottom line
-
-- **JPEG is not the only place dates hide.** HEIC, RAW, TIFF, WebP, PNG (sometimes), and video containers all carry dates; Adobe mostly via **XMP/IPTC**, not magic private fields.
-- **MP3: yes — ID3 (especially TDRC)** is real and useful for meetings, at **medium** trust; always combine with **filename/folder**. Prefer also supporting **M4A** and **WAV (BWF)** when you control the recorder.
-- **Best non-header bets in real libraries:** Takeout/sidecar JSON, and **“this hash already has a good date.”**
-- **ChronoVault’s existing scorer is already the right shape.** The work is mostly extractors + base confidence entries + opt-in enrich for the review bucket.
-
----
-
-## Document history
-
-- **2026-08-01** — Initial catalog packaged from design discussion (signals research; not an implementation commit by itself).
+No current code reads audio tags, video container dates, IPTC, external sidecars, Takeout JSON, or known-date hash twins. Those capabilities must not be described as part of the working pipeline until implemented.

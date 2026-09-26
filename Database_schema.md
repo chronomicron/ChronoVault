@@ -1,132 +1,191 @@
 # ChronoVault Database Schema
 
-ChronoVault currently uses two separate SQLite databases, one per stage of the pipeline. They are intentionally kept separate: `located_files.db` is a disposable working inventory built by Indexer, while `archive_database.db` is the permanent record of what actually lives in the archive.
+ChronoVault uses two independent SQLite databases:
+
+- `located_files.db` is the disposable source inventory. Indexer creates its base tables; Classify Media, Condition Database, Duplicate Finder, and Importer enrich or update its rows.
+- `archive_database.db` lives inside the archive root and is the persistent record of files Importer copied. Importer creates its base table; Audit Archive, Duplicate Finder, and `write_data` add or update later fields.
+
+There are no foreign keys between these databases, no schema-version table, and no explicit application-created indexes. SQLite creates implicit indexes for the declared primary keys and `UNIQUE` path constraints. Cross-database relationships such as `located_files.file_path` → `archive_files.source_path` are conventions, not enforced references.
+
+SQLite's dynamic typing also means the declared types below are affinities rather than strict validation. Statuses, source names, confidence ranges, booleans, and date formats have no `CHECK` constraints.
 
 ---
 
-# 1. Located Files Database (`located_files.db`)
+# 1. Source Inventory (`located_files.db`)
 
-Created and maintained by **Indexer**. This database is the raw inventory of every matching file found across all the source locations you've scanned (old drives, USB keys, cloud folders, etc). It exists purely as working data to drive Importer — it does not represent the final archive.
+## 1.1 `located_files`
 
-**Table: `located_files`**
+Indexer creates this table. It uses `INSERT OR IGNORE` keyed by `file_path`, so an already-known path is not refreshed when its size, timestamps, contents, or status change. Paths are stored as strings produced from the supplied search path; they are not forced to be absolute.
 
-| Column              | Type    | Description                                                        |
-|---------------------|---------|----------------------------------------------------------------------|
-| `id`                | INTEGER | Auto-incrementing primary key.                                       |
-| `file_path`         | TEXT    | Full source path to the file. Unique — prevents duplicate entries when Indexer is re-run over the same location. |
-| `file_extension`    | TEXT    | File extension, e.g. `.jpg`, `.mp4`, `.thm`.                         |
-| `file_size`         | INTEGER | File size in bytes, as found at index time.                          |
-| `creation_date`     | TEXT    | File system creation timestamp.                                      |
-| `modification_date` | TEXT    | File system last-modified timestamp.                                 |
-| `status`            | TEXT    | Pipeline status. See below.                                          |
-| `file_hash`         | TEXT    | SHA-256 hash of the file's contents. `NULL` until Condition Database or Duplicate Finder runs against this file — it isn't computed by Indexer. |
+### Base columns created by Indexer
 
-**Status values:**
+| Column | Declared type / constraint | Meaning |
+|---|---|---|
+| `id` | `INTEGER PRIMARY KEY AUTOINCREMENT` | Inventory row identifier. |
+| `file_path` | `TEXT UNIQUE NOT NULL` | Source path. String identity is the deduplication key. |
+| `file_extension` | `TEXT` | Lowercase final suffix from `Path.suffix`, including the dot. |
+| `file_size` | `INTEGER` | Size observed at index time. |
+| `creation_date` | `TEXT` | ISO datetime derived from `st_ctime`; on typical Linux filesystems this is metadata-change time, not true creation time. |
+| `modification_date` | `TEXT` | ISO datetime derived from `st_mtime`. |
+| `status` | `TEXT DEFAULT 'located'` | Shared pipeline status; values currently used are described below. |
 
-| Status     | Meaning                                                                 |
-|------------|---------------------------------------------------------------------------|
-| `located`  | Found by Indexer, not yet processed by Importer.                          |
-| `imported` | Successfully copied into the archive by Importer. Permanently done — never re-processed. |
-| `excluded` | Did not pass one of Importer's filters (size, EXIF requirement, excluded path, thumbnail). **Re-evaluated on every Importer run**, since filters can change — not a permanent state. |
-| `duplicate`| Marked by Condition Database as a repeat of another file already staying `located` — same hash, different path. Skipped from import, but never deleted. |
+### Columns added later with `ALTER TABLE`
 
-**Built by:** Indexer, incrementally, across one or more runs against different source locations. Rows are never deleted by the normal pipeline; only their `status` changes over time as Importer processes them. `file_hash` is added later, and only, by Condition Database or Duplicate Finder (`source` mode) — via `ALTER TABLE` the first time either runs, so this column exists even on older databases created before hashing was added.
+| Column | Declared type | Added/written by | Meaning |
+|---|---|---|---|
+| `media_score` | `INTEGER` | Classify Media | Personal-media likelihood score, normally 0–100. |
+| `media_category` | `TEXT` | Classify Media | `certain_yes`, `likely_yes`, `unknown`, `likely_not`, or `certain_not`. `NULL` is the normal “not classified yet” marker. |
+| `media_reason` | `TEXT` | Classify Media | Human-readable classification evidence. |
+| `media_excluded` | `INTEGER DEFAULT 0` | Classify Media | `1` when Classify Media itself set the row to `excluded`; used by forced reclassification to distinguish its own exclusions. Importer does not honor this ownership distinction. |
+| `confidence` | `INTEGER` | Condition Database | Date-analysis confidence. `NULL` is used as the “not conditioned yet” marker. |
+| `date_reason` | `TEXT` | Condition Database | Explanation returned by `analyze_date`. |
+| `date_source` | `TEXT` | Condition Database | Primary signal source returned by `analyze_date`. |
+| `date_taken` | `TEXT` | Condition Database | Chosen datetime serialized with `datetime.isoformat()`, or `NULL`. |
+| `file_hash` | `TEXT` | Condition Database or Duplicate Finder source mode | Cached SHA-256 digest. No uniqueness constraint and no size/mtime invalidation metadata. |
 
----
+Classify Media and Condition Database add their columns only when they run. A newly created Indexer database therefore does not initially contain these fields.
 
-# 1b. Located Archives Table (`located_archives`, inside `located_files.db`)
+### Current `status` values
 
-Also created and maintained by **Indexer**, alongside `located_files`, in the same database. Tracks compressed/disc-image files (ZIP, TAR, ISO) found during a scan — kept in a separate table, and deliberately named differently from `archive_files` (below), since "an archive Indexer found on a source drive" and "a file already copied into the ChronoVault archive" are genuinely different things that happen to share the word "archive."
+| Status | Writers and behavior |
+|---|---|
+| `located` | Initial Indexer value. Classify Media also sets this for accepted/non-excluded results. Condition Database processes only `located` rows with `confidence IS NULL`; Importer considers `located` eligible. |
+| `excluded` | Classify Media uses it for configured excluded categories; Importer uses the same value for its independent size/path/EXIF/thumbnail filters. Importer re-evaluates **all** excluded rows and does not check `media_excluded`, so a classifier exclusion is not currently durable across Importer. |
+| `duplicate` | Condition Database assigns this to all but one row in an in-inventory SHA-256 group. Importer does not select these rows. Selection of the retained row has no `ORDER BY` guarantee. |
+| `imported` | Importer assigns this after a successful file copy. It updates the source status before inserting the corresponding archive row, so this status does not by itself prove that `archive_files` was safely recorded. |
 
-**Table: `located_archives`**
+No database constraint limits `status` to these values. The proposed `candidate` status described later is not implemented.
 
-| Column                 | Type    | Description |
-|-------------------------|---------|--------------|
-| `id`                    | INTEGER | Auto-incrementing primary key. |
-| `archive_path`          | TEXT    | Full path to the archive. Unique. |
-| `archive_type`          | TEXT    | `zip`, `tar`, `targz`, `iso`, or `unknown` (an archive extension with no built-in content lister). |
-| `archive_size`          | INTEGER | Archive file size in bytes. |
-| `contents_listed`       | INTEGER | `1` if contents were successfully listed at some point, `0` if never attempted or attempted-and-failed. |
-| `matching_file_count`   | INTEGER | How many members inside matched the configured media `extensions`. `NULL` if never listed. |
-| `matching_files`        | TEXT    | JSON list of matching member names/paths inside the archive (capped at 500). `NULL` if never listed. |
-| `note`                  | TEXT    | Explains a partial or failed listing attempt (missing `pycdlib`, truncated list, or the underlying error for a corrupt archive). `NULL` otherwise. |
+### Implemented date-source names
 
-**Built by:** Indexer. Every detected archive's *location* is recorded unconditionally, regardless of config. Whether its *contents* also get listed (via `zipfile`/`tarfile`/`pycdlib`, no extraction) is controlled by `look_inside_archives` in `indexer/config.json`. Turning that flag on in a later run backfills content-listing for archives already on record from an earlier run — Indexer never needs a full rescan just because the flag changed, and never re-lists an archive whose contents were already successfully read. See `indexer/README.md` for the full behavior.
+Condition Database can persist any primary source currently returned by `analyze_date`:
 
-**Not yet built:** anything that actually *acts* on `matching_files` — extracting those specific members so they can be reviewed and imported. Listing is read-only, same as everything else Indexer does; extraction is tracked as future work in `roadmap.md`.
+`exif_gps`, `exif_original`, `exif_digitized`, `tiff_datetime`, `xmp_create_date`, `xmp_modify_date`, `filename_pattern`, `path_folder_pattern`, `ocr_corner_stamp`, `filesystem_fallback`, or `NULL` when no signal exists.
 
----
+`ocr_corner_stamp` appears only when Condition Database is configured with `try_ocr: true`. Some low-base-confidence sources may be gathered without becoming the stored primary source.
 
-# 2. Archive Database (`archive_database.db`)
+## 1.2 `located_archives`
 
-Created and maintained by **Importer**, and lives *inside* the archive folder itself (`archive/archive_database.db`). This database represents ground truth for what is actually in the archive — every row corresponds to a real file sitting on disk, either under `archive/YYYY/MM/DD/` or, for files ChronoVault wasn't confident about, under `archive/_review_needed/` (see `date_uncertain` below — there's no separate column marking a file as "in review"; it's implied by that flag plus wherever `archive_path` actually points).
+Indexer creates and owns this table for compressed files and disc images found on source media. It is distinct from `archive_files`: a row here represents an archive container discovered during scanning, not a media file copied into ChronoVault's destination archive.
 
-**Table: `archive_files`**
+| Column | Declared type / constraint | Meaning |
+|---|---|---|
+| `id` | `INTEGER PRIMARY KEY AUTOINCREMENT` | Row identifier. |
+| `archive_path` | `TEXT UNIQUE NOT NULL` | Container path, not forced absolute. |
+| `archive_type` | `TEXT` | `zip`, `tar`, `targz`, `iso`, or `unknown`. |
+| `archive_size` | `INTEGER` | Size observed during the latest row update; can be `NULL` if stat fails. |
+| `contents_listed` | `INTEGER DEFAULT 0` | `1` after a successful listing, including a successful listing with no matching members; `0` if not attempted or unsuccessful. |
+| `matching_file_count` | `INTEGER` | Number of retained matching names. Listing stops at 500, so this is capped rather than a true total for larger archives. `NULL` when listing was not successful. |
+| `matching_files` | `TEXT` | JSON array of retained member names, capped at 500; `NULL` when listing was not successful. |
+| `note` | `TEXT` | Missing dependency, unsupported/corrupt archive, or truncation note. A later run with archive listing disabled can clear a previous failure note. |
 
-| Column                     | Type    | Description                                                              |
-|----------------------------|---------|--------------------------------------------------------------------------|
-| `id`                       | INTEGER | Auto-incrementing primary key.                                               |
-| `archive_path`             | TEXT    | Final path of the file inside the archive. Unique. Either a `YYYY/MM/DD/` date folder, or `_review_needed/` for low-confidence files. |
-| `source_path`              | TEXT    | Original path the file was copied from (for traceability/auditing).         |
-| `file_extension`           | TEXT    | File extension.                                                              |
-| `file_size`                | INTEGER | File size in bytes.                                                         |
-| `date_taken`                | TEXT    | The date `analyze_date` chose for this file. Used to build the archive folder path when confidence is high enough; otherwise the file still records this date, it's just not trusted enough to file by. |
-| `date_source`               | TEXT    | Where the chosen date came from: `exif_original`, `exif_digitized`, or `filesystem_fallback`. |
-| `filesystem_creation_date`  | TEXT    | The file's filesystem creation date, recorded regardless of whether it was the date actually used — kept for cross-checking. |
-| `date_uncertain`            | INTEGER | `0` or `1`. `1` means `analyze_date`'s confidence was below its uncertainty threshold (currently confidence < 50) — these files are routed to `_review_needed/` instead of a date folder. Derived from `confidence`, kept as a simple flag for convenience. |
-| `confidence`                | INTEGER | `analyze_date`'s confidence score for the chosen date, 0–100. Added after the date-analysis rework — see `analyze_date/analyze_date.py` for exactly how it's calculated (base score by source, adjusted for agreement/disagreement between signals, capped low for implausible dates). |
-| `date_reason`               | TEXT    | Short human-readable explanation from `analyze_date` for why this date and confidence were chosen, e.g. `"EXIF (DateTimeOriginal) -- confirmed by filesystem creation date"`. Useful for a future GUI review screen, and for spot-checking results in the meantime. |
-| `date_added`                | TEXT    | Timestamp of when the file was actually copied into the archive.             |
-| `camera_make`                | TEXT    | Camera manufacturer, from EXIF, if present.                                 |
-| `camera_model`               | TEXT    | Camera model, from EXIF, if present.                                        |
-| `gps_latitude`               | REAL    | Decimal-degree latitude, converted from EXIF GPS data, if present.          |
-| `gps_longitude`              | REAL    | Decimal-degree longitude, converted from EXIF GPS data, if present.         |
-| `aperture`                   | TEXT    | f-stop, from EXIF, if present (e.g. `f/2.8`).                               |
-| `iso_speed`                  | TEXT    | ISO speed rating, from EXIF, if present.                                    |
-| `focal_length_mm`            | TEXT    | Focal length in mm, from EXIF, if present.                                  |
-| `file_hash`                  | TEXT    | SHA-256 hash of the file's contents. `NULL` until Audit Archive runs and caches it for every matched (on-disk + in-database) file — not computed by Importer itself. |
-| `user_corrected_date`        | TEXT    | Set only when a person manually corrects a file's date (via `write_data.apply_date_correction()`). The original algorithmic fields above (`date_taken`, `date_source`, `confidence`, `date_reason`) are left completely untouched when this happens — this column holds the correction *alongside* that original evidence, not instead of it. `NULL` for files that have never been manually corrected. |
-| `corrected_at`                | TEXT    | Timestamp of when the correction in `user_corrected_date` was applied. `NULL` if never corrected. |
-
-**Built by:** Importer, one row per file, at the moment it's successfully copied — including `confidence`, `date_reason`, and `date_uncertain` from `analyze_date`'s output. `file_hash` is filled in later by Audit Archive, which caches hashes for every file it can match against the database (mainly so Duplicate Finder doesn't need to re-hash them). `user_corrected_date` and `corrected_at` are filled in later still, by `write_data.apply_date_correction()`, whenever a person manually corrects a file that Importer originally filed into `_review_needed/` — at which point the file is also physically moved into the appropriate `YYYY/MM/DD/` folder. All of these were added after the table already existed in earlier versions of the archive; they're all added automatically via `ALTER TABLE` the first time the relevant tool runs, so older `archive_database.db` files are upgraded in place rather than needing to be rebuilt.
-
-Note for anything that checks a file's placement (e.g. Audit Archive): `user_corrected_date`, when present, is authoritative over `date_taken` for deciding where a file *should* be — a person's manual correction is a deliberate decision, while `date_taken` is deliberately preserved unchanged as historical evidence of the original algorithmic guess, not as the current "correct" answer.
+Archive contents are never extracted by current code. Turning listing on later updates rows only for archive paths encountered during another normal source walk.
 
 ---
 
-# 3. Future Schema — Labels (Not Yet Implemented)
+# 2. Archive Record (`archive_database.db`)
 
-Once an AI labeling agent (or manual tagging) is introduced, archived media will need to support labels like people, places, and things — e.g. "Japan," "uncle Andre," "vacation." A single file can have several labels, and a single label applies to many files, so this is modeled as a many-to-many relationship using two additional tables inside `archive_database.db`.
+## 2.1 `archive_files`
 
-**Proposed table: `labels`**
+Importer creates `archive_database.db` under `archive_root` and creates this table. `archive_path` is the only declared unique business key. Paths can be absolute or working-directory-relative depending on Importer's configured `archive_root`.
 
-| Column        | Type    | Description                                                    |
-|---------------|---------|----------------------------------------------------------------|
-| `id`          | INTEGER | Auto-incrementing primary key.                                     |
-| `label_name`  | TEXT    | The label itself, e.g. `"uncle Andre"`, `"Japan"`, `"beach"`. Unique. |
-| `category`    | TEXT    | Optional grouping — e.g. `person`, `place`, `thing`.                |
+The table is intended to describe copied archive files, but it is not guaranteed to match disk state: files can be moved/deleted externally, partial copies can remain, and filesystem/database operations are not transactional. Audit Archive exists to reconcile that drift.
 
-**Proposed table: `file_labels`** (the join table)
+### Base columns created by Importer
 
-| Column       | Type    | Description                                              |
-|--------------|---------|--------------------------------------------------------------|
-| `file_id`    | INTEGER | References `archive_files.id`.                                |
-| `label_id`   | INTEGER | References `labels.id`.                                       |
-| `source`     | TEXT    | How the label was applied — e.g. `ai`, `user` — so AI-suggested and user-confirmed labels can be told apart later. |
+| Column | Declared type / constraint | Meaning |
+|---|---|---|
+| `id` | `INTEGER PRIMARY KEY AUTOINCREMENT` | Archive row identifier. |
+| `archive_path` | `TEXT UNIQUE NOT NULL` | Destination path chosen by Importer or later updated by `write_data`. |
+| `source_path` | `TEXT` | Source path used for the copy. No foreign key to `located_files`. |
+| `file_extension` | `TEXT` | Lowercase destination/source suffix including the dot. |
+| `file_size` | `INTEGER` | Source size observed immediately before copying. |
+| `date_taken` | `TEXT` | Original analyzer choice serialized with `isoformat()`. Manual correction does not overwrite it. |
+| `date_source` | `TEXT` | Primary analyzer source used by Importer. Current possible values are listed below. |
+| `filesystem_creation_date` | `TEXT` | Analyzer's filesystem fallback/cross-check value serialized with `isoformat()`. |
+| `date_uncertain` | `INTEGER DEFAULT 0` | Importer stores `1` when confidence is below 50 and routes the file to its configured review folder. `write_data` sets it to `0` after a correction. It is a flag, not a constraint tying the row to a particular folder name. |
+| `date_added` | `TEXT` | `datetime.now().isoformat()` when Importer records the copy. |
+| `camera_make` | `TEXT` | EXIF camera manufacturer, if read. |
+| `camera_model` | `TEXT` | EXIF camera model, if read. |
+| `gps_latitude` | `REAL` | Decimal latitude derived from EXIF GPS coordinates. |
+| `gps_longitude` | `REAL` | Decimal longitude derived from EXIF GPS coordinates. |
+| `aperture` | `TEXT` | Formatted EXIF aperture such as `f/2.8`. |
+| `iso_speed` | `TEXT` | EXIF ISO value converted to text. |
+| `focal_length_mm` | `TEXT` | Formatted EXIF focal length such as `50.0mm`. |
 
-This design means:
+### Columns added later with `ALTER TABLE`
 
-- A photo can carry any number of labels without changing its row in `archive_files`.
-- Renaming a label (e.g. correcting a misspelled name) updates one row in `labels`, not every photo that uses it.
-- Searching "show me everything labeled Japan" becomes a simple join across `file_labels` and `archive_files`.
-- Distinguishing AI-suggested labels from confirmed/manual ones is possible from day one, without a schema change later.
+| Column | Declared type | Added/written by | Meaning |
+|---|---|---|---|
+| `confidence` | `INTEGER` | Importer | Date-analysis confidence stored with a new archive row. Importer ensures this column for older databases. |
+| `date_reason` | `TEXT` | Importer | Analyzer explanation stored with a new archive row. Importer ensures this column for older databases. |
+| `file_hash` | `TEXT` | Audit Archive or Duplicate Finder archive mode | Cached SHA-256 digest for documented files. Existing non-`NULL` values are trusted without checking current size or modification time. |
+| `user_corrected_date` | `TEXT` | `write_data` | Latest manual correction as an ISO string. Original analyzer fields remain unchanged. |
+| `corrected_at` | `TEXT` | `write_data` | Timestamp of the latest manual correction. Earlier correction history is not retained. |
 
-A future AI labeler is expected to follow the same "hand it evidence, get back a scored answer" shape as `analyze_date` — so however many labels or confidence scores it produces per file, they'd land in these two tables without needing `archive_files` itself to change.
+`write_data` ensures both correction columns before it looks up the requested row, so even an unsuccessful request for an unknown ID can migrate the schema.
 
-This section is a design placeholder — these tables are not created by any current tool. They'll be implemented when the AI labeling phase of the project begins.
+### Archive `date_source` values
+
+Importer calls `analyze_date` again rather than consuming Condition Database's stored fields. Because Importer does not enable OCR, values it can currently store are:
+
+`exif_gps`, `exif_original`, `exif_digitized`, `tiff_datetime`, `xmp_create_date`, `xmp_modify_date`, `filename_pattern`, `path_folder_pattern`, `filesystem_fallback`, or `NULL` if no signal is available.
+
+In normal Importer processing an accessible source file supplies a filesystem signal, so `NULL` is unusual. `xmp_modify_date` is gathered but normally cannot become primary while a filesystem timestamp is available because its base confidence is lower.
+
+### Field ownership and ordering concerns
+
+- Importer copies the file, marks the source row `imported`, then inserts the archive row with `INSERT OR IGNORE`. A failure or ignored uniqueness conflict can leave disk/source state without a newly recorded archive row.
+- Importer recomputes date evidence and does not read Condition Database's stored `date_taken`, `date_source`, `confidence`, or `date_reason`.
+- Audit Archive and Duplicate Finder may cache hashes but do not invalidate them after in-place file changes.
+- `write_data` moves the file before updating `archive_path`; a later SQL failure can leave the database pointing to the old location.
+- Audit Archive treats `user_corrected_date` as authoritative over `date_taken` when checking recognized date folders.
+- `retrieve_data` and `write_data` resolve stored relative paths using the process working directory, which can differ from the directory used by Importer.
 
 ---
 
-# 4. Future Schema — Candidate Review (Designed, Not Yet Implemented)
+# 3. Migration Model and Compatibility Risks
 
-A `candidate` status for `located_files.status`, plus a `candidate_decision` column (`pending`/`approved`/`rejected`), to support review workflows for files a person needs to explicitly say yes/no to before import — e.g. files found via archive-content listing (see `located_archives` above) once extraction is built, or images too ambiguous for automatic photo-vs-graphic discrimination. Rejection is a separate flag from `status`, not a status change to `excluded`, specifically so a rejected candidate can be revisited later without redoing whatever work produced it in the first place. See `roadmap.md` for the full design rationale.
+ChronoVault uses decentralized, tool-owned migrations: each tool checks `PRAGMA table_info(...)` and adds only the columns it needs. There is no central migration sequence, schema version, transaction covering all migrations, or validation of existing column types/defaults.
+
+Consequences:
+
+- Tools assume their base table already exists; pointing them at a new/nonexistent database path can create an empty SQLite file and then fail on the missing table.
+- Older databases are upgraded only when the relevant tool runs.
+- A tool can successfully add its own columns while other later-required columns remain absent.
+- `SELECT *` consumers expose whichever columns happen to exist and may fail when they assume a column introduced by another tool is present.
+- No constraints enforce score ranges, boolean values, status/category vocabularies, ISO date strings, hash format, or consistency between flags and paths.
+
+These are current implementation characteristics, not a proposed migration design. Central schema versioning and integrity checks are roadmap work.
+
+---
+
+# 4. Future Schema — Labels (Not Implemented)
+
+The following remains a design proposal. No current tool creates or reads these tables.
+
+## Proposed `labels`
+
+| Column | Proposed type / constraint | Meaning |
+|---|---|---|
+| `id` | `INTEGER PRIMARY KEY AUTOINCREMENT` | Label identifier. |
+| `label_name` | `TEXT UNIQUE` | Label text such as `Japan`, `beach`, or a person's name. |
+| `category` | `TEXT` | Optional class such as `person`, `place`, or `thing`. |
+
+## Proposed `file_labels`
+
+| Column | Proposed type | Meaning |
+|---|---|---|
+| `file_id` | `INTEGER` | Intended reference to `archive_files.id`. |
+| `label_id` | `INTEGER` | Intended reference to `labels.id`. |
+| `source` | `TEXT` | Intended provenance such as `ai` or `user`. |
+
+The proposal still needs decisions about actual foreign-key enforcement, uniqueness of `(file_id, label_id, source)`, deletion behavior, label confidence, and confirmation state.
+
+---
+
+# 5. Future Schema — Candidate Review (Designed, Not Implemented)
+
+The roadmap proposes a `candidate` source status plus a separate `candidate_decision` field (`pending`, `approved`, or `rejected`) for media requiring human approval before import. This is not present in the database or code.
+
+The proposal is intended to serve both archive-member extraction and ambiguous media classification without conflating a human rejection with the existing `excluded` status. Before implementation it needs a single owner for schema migration and explicit interaction rules with `media_excluded`, Condition Database selection, and Importer selection.

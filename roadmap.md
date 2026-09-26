@@ -1,205 +1,185 @@
 # ChronoVault Roadmap
 
-A living map of the project: what's built, what's missing, and what's next — organized around the real use case (an old hard drive full of scattered media, archived and made searchable), not just a feature list.
+This roadmap distinguishes current capability, verified limitations, and proposed work. Current behavior is defined by the implementation and subsystem READMEs; this file records direction and priorities rather than promising delivery dates.
 
-## The Use Case, Stage by Stage
+## Product direction
 
-| # | Stage | Status |
-|---|---|:---:|
-| 1 | Point at a storage location (HDD/NAS/cloud-mounted folder) | ✅ Done |
-| 2 | Recursively scan, including hidden folders | 🟡 Likely works (`Path.rglob`), never explicitly tested with a hidden-folder case |
-| 3 | Scan arbitrary file types (images, video, audio, documents) | 🟡 Mechanically works (just extensions in config) — only images get *smart* date detection so far |
-| 4 | Scan Trash/Recycle Bin | ✅ Already works — it's just a folder, point Indexer at it |
-| 4b | True forensic undelete (unallocated sectors) | ❌ Not started — would wrap an external tool (PhotoRec/TestDisk), not build from scratch |
-| 5 | **Pre-copy conditioning**: hash, date, mark duplicates *before* copying | ✅ Done — `condition_database` |
-| 5b | Skip files whose hash already exists in the *archive* (not just among themselves) | ❌ Real gap — `condition_database` dedupes within `located_files.db` only, doesn't check against `archive_database.db`. **Elevated importance**, not just a nice-to-have: since deleting originals from source is explicitly deferred (see row 9), this is the actual mechanism that makes repeatedly re-scanning an un-deletable source (a DVD, a write-protected card) harmless — without it, the same file could genuinely be re-copied every time its source gets re-indexed. |
-| 5c | Refuse to index an existing ChronoVault archive by accident | ✅ Fixed — found via a real, reproducible mistake during GUI testing: pointing both Source and Archive at the same existing archive re-imported every file into itself, landing as `(1)`/`(2)` duplicate copies (every tool behaved correctly given the input — the whole scenario was still wrong). Indexer now refuses upfront if the search path itself contains `archive_database.db` (only Importer ever creates this file), before touching the database at all. Override: `--allow-archive-source`, for deliberate migration/consolidation. GUI reuses the identical check (not a separate copy) and shows a confirmation dialog. **Known limitation, accepted for now:** only checks the search path itself, not archives nested deeper inside a larger scanned folder — narrower than 5b above, which would also catch cross-location duplicate content generally, not just this specific "pointed straight at an archive" case. |
-| 6 | Determine creation date using multiple independent tools | ✅ Done — `analyze_date` + 7 signal sources (see below) |
-| 7 | Copy into archive | ✅ Done — Importer |
-| 8 | Store date evidence + confidence in the archive database | ✅ Done |
-| 9 | Prompt to delete originals from source | ❌ Not built — deliberately deferred, not just "dangerous." Read + copy is the core use case; deletion is explicitly a later problem, if it's ever built at all. Reasoning: once 5b (below) closes the archive-hash cross-check gap, re-scanning the same un-deletable source (a burned DVD, a write-protected card) repeatedly costs only scan time, never duplicate storage or archive entries — the file simply won't be re-copied once its hash is already archived. This makes "can't delete from source" a non-problem in practice, not just an accepted risk. If cleanup is ever built, it needs to distinguish two genuinely different failure modes: a *software* restriction (locked folder, read-only mount — informable, maybe fixable) versus a *physical* one (a burned disc, a write-protected card's physical switch — not fixable by anyone, ever, regardless of permissions). The honest behavior in the physical case is detecting non-writability and telling the user plainly, not retrying or treating it as a bug. |
-| 10 | AI labeling (people, places, things) | ❌ Not built — schema designed in `Database_schema.md`, unimplemented |
-| 10b | Location labeling via GPS reverse-geocoding | ❌ Not built, but much smaller than full AI labeling |
-| 11 | User-applied manual labels | ❌ Not built — needs the labels schema *and* a GUI |
-| 12 | GUI (thumbnail gallery, filter by label/date range) | ❌ Not built at all — see "GUI v0.1" below for the newly-scoped first step |
+ChronoVault is a local-first, non-destructive set of small tools for discovering scattered media, assessing likely relevance and capture date, and copying selected files into a chronological archive. The Qt application orchestrates those tools; it is not a second pipeline implementation.
 
-## `analyze_date` Signal Sources
+The working pipeline is:
 
-| Source | Confidence | Status |
-|---|:---:|:---:|
-| EXIF GPS timestamp | 98 | ✅ |
-| EXIF DateTimeOriginal | 95 | ✅ |
-| TIFF native DateTime tag | 90 | ✅ |
-| XMP CreateDate (Photoshop/Lightroom) | 80 | ✅ |
-| Filename pattern (US + European disambiguation) | 70 | ✅ |
-| OCR corner date-stamp (opt-in) | 60 | ✅ — real limitations documented (Japanese/kanji stamps, dot-matrix CCTV fonts) |
-| Folder path pattern | 40 | ✅ |
-| Filesystem date | 30 | ✅ (fallback of last resort) |
-| **ID3 tags (MP3)** | — | ❌ `audio_tools/` is a documented placeholder, no code |
-| **MP4 container metadata** | — | ❌ `video_tools/` is a documented placeholder, no code |
-| **Adjacent-files inference** | — | ❌ Discussed, not built — architecturally different from every other signal (needs database access to siblings' *already-resolved* dates, not just this file's own path/metadata). Open design question: does this live in `multi_tools/` as a function that accepts pre-fetched sibling data, or as a second pass inside `condition_database.py` (which already has the natural database access)? |
-| **PDF/document metadata** | — | ❌ Not scoped yet at all — no `document_tools/` folder exists |
+```text
+Indexer → Classify Media → Condition Database → Importer → Audit Archive
+```
 
-## Review & Correction Workflow
+Duplicate Finder and the `retrieve_data`/`write_data` review boundary support the pipeline. Originals are not deleted.
 
-| Piece | Status |
-|---|:---:|
-| `retrieve_data` (read-only, UI-agnostic) | ✅ Done |
-| `write_data` (applies corrections, preserves original evidence) | ✅ Done |
-| Duplicate-group review (which copy is "correct" when Duplicate Finder finds cross-folder dupes) | ❌ Not built — same review-workflow pattern, not yet applied to this case |
+## Current capability
 
-## Testing Infrastructure
+### Discovery and source inventory
 
-| Piece | Status |
-|---|:---:|
-| `generate_test_data.py` — 16 scenario categories across JPEG/TIFF/BMP/RAW-approx/THM | ✅ Done |
-| `test_functions/` — env check, retrieve/write/OCR/analyze_date debugging scripts | ✅ Done |
-| `chronovault.sh` — step-by-step menu (cleanup → generate → index → condition → import → audit → duplicates) | ✅ Done |
-| `chronovault.sh` self-contained test environment — everything lives in `chronovault_test/`, cleanup is a single safe folder delete, real archives at the project root are never at risk | ✅ Done |
-| `chronovault.sh` module-test menu options (test_env, test_retrieve_data, test_write_data, test_analyze_date, test_ocr_date) | ✅ Done |
-| `generate_test_data.py`: hidden-folder scenario (2 dot-prefixed folders, one at the search root and one nested) | ✅ Done — confirmed directly: `Path.rglob('*')` does walk into dot-prefixed folders at both depths, so item #6 in the "next 10" list (roadmap use-case row 2) is no longer just an assumption once run through a real Indexer pass |
-| `generate_test_data.py`: European-style (day-first) filename-only date scenario, no EXIF | ✅ Done — confirmed directly against `analyze_filename.py`'s actual DMY logic, all four test cases parsed correctly as day-first |
-| `generate_test_data/README.md` documentation gap | ⚠️ Found and corrected: the README described TIFF/BMP/RAW-stub/THM scenarios and an `--other-format-samples` argument that don't exist anywhere in the actual code. README now matches the real script; whether those formats should actually be built is an open question, not resolved by the correction. |
-| **Bug: `ocr_tools.py` imported `cv2`/`numpy`/`pytesseract` at module level**, meaning anyone using `analyze_date` at all (via Importer, Condition Database, etc.) needed those packages installed even without ever touching OCR — surfaced as a real `ModuleNotFoundError: No module named 'cv2'` on a machine without opencv, from nothing more than launching Importer. | ✅ Fixed — imports moved inside `_otsu_threshold()` and `_ocr_with_confidence()`, the two functions that actually use them. Verified directly: `analyze_date` imports and runs correctly with all three packages genuinely blocked from being imported, and only fails — correctly — the moment `try_ocr=True` actually needs them. `test_env.py` updated to mark NumPy/OpenCV/Tesseract/pytesseract as optional, matching this. |
-| **Bug: `condition_database.py` never `ensure_column`'d `file_hash`**, but read and wrote that column throughout. The old assumption (documented in `condition_database/README.md`) was that Duplicate Finder would have already added it — but Duplicate Finder runs *last* in the documented pipeline order, so the very first Indexer → Condition Database run always hit this. Every per-file row silently failed (swallowed by a broad `try/except`, printed as `FAILED`), then the final duplicate-check query crashed outright with `sqlite3.OperationalError: no such column: file_hash`. | ✅ Fixed — added the missing `ensure_column()` call alongside the other four. Verified directly via a real generate → index → condition run: 0 failures, duplicate detection completes, report writes out. `condition_database/README.md` updated with a "Bug Fixed" section documenting this, matching `audit_archive/README.md`'s existing convention for logging caught bugs. |
+- Indexer recursively discovers configured extensions, including dot-prefixed directories, and accumulates rows in `located_files.db`.
+- It refuses a source root that already contains `archive_database.db` unless explicitly overridden. This guard does not detect a ChronoVault archive nested below a broader source root.
+- ZIP, TAR-family, and ISO files can be recorded in `located_archives`. Optional listing records matching member names; ZIP/TAR paths are exercised by generated fixtures, while successful ISO listing still needs a real-file verification.
+- Archive members are not extracted or added to the media workflow.
+- Classify Media scores images conservatively and records its category, reason, and exclusion flag before hashing.
 
-## Documentation Debt
+### Conditioning, import, and review
 
-| File | Status |
-|---|:---:|
-| Root `README.md`, `analyze_date/README.md`, `image_tools/README.md`, `audio_tools/README.md`, `video_tools/README.md`, `test_functions/README.md`, `generate_test_data/README.md`, `multi_tools/README.md`, `condition_database/README.md` | ✅ Up to date |
-| Old `ocr_date/` folder | ⚠️ Superseded, should be deleted (unconfirmed whether this happened) |
+- Condition Database hashes eligible source rows, runs shared date analysis, and marks duplicates within the source inventory.
+- Date analysis currently combines JPEG-family GPS/EXIF/XMP, TIFF `DateTime`, filename, folder, filesystem, and opt-in OCR evidence. Audio- and video-specific metadata are not implemented.
+- Importer copies selected sources into dated folders, routes confidence below 50 to `_review_needed/`, and records archive metadata in `archive_database.db`.
+- `retrieve_data` reads review state without mutation. `write_data` applies a chosen date, moves the archive file, and preserves original algorithmic fields while recording correction metadata.
+- Audit Archive reports disk/database mismatches and caches hashes; it does not repair the archive.
+- Duplicate Finder reports content-identical files in either source or archive mode; it does not delete or select a winner.
 
-## New Since Last Roadmap Pass
+### User interface and diagnostics
 
-### Multi-language support (French + Japanese) — French month names DONE, rest not yet built
+- The PySide6 GUI launches the pipeline and supporting tools, streams output, synchronizes configured paths for mapped tools, records activity, and generates a diagnostic report.
+- Archive-source and ambiguous destination checks guard common path-selection mistakes.
+- The interface remains a launcher/orchestration layer. It does not yet provide a thumbnail browser, date/label filtering, candidate review, duplicate resolution, or audit repair.
+- Running tools can be stopped by terminating their process. Graceful cancellation and cleanup of an in-progress copy are not implemented.
 
-This touches several different places, scoped separately rather than as one task:
+### Test support
 
-- **`analyze_folder.py`'s month names — ✅ Done.** French entries (`janvier`, `février`/`fevrier`, `mars`, ... both accented and unaccented spellings for every name that carries an accent) added to `MONTH_NAMES`. This surfaced a real bug in the process, not just a data gap: the `month_name_year` regex matched `[A-Za-z]+` only, so an accented name like `février` could never match at all — it would silently fall through to "no date found" rather than erroring, exactly the quiet-failure mode this project works to avoid. Fixed by matching `[^\W\d_]+` instead (any language's letters), which also means a third language's month names later needs only dictionary entries, no further regex change. Verified directly: 15 test cases (English regression + French accented/unaccented + negative cases like a bare `1080` folder) all pass, and confirmed end-to-end through the real `analyze_date()` call against genuine files sitting in an actual accented folder (`Old_Backup_1/février 2022/`) — not just the isolated function. `generate_test_data.py` now has a dedicated `french_month` scenario exercising this for real. Japanese folder naming by month name was considered and deprioritized — Japanese dates are typically numeric (`2024年3月`), so the existing year/year-month patterns already cover it reasonably without new month-name entries.
-- **OCR + French** — mostly already works. French date stamps are typically `DD/MM/YYYY`, and the DMY disambiguation logic already built for `ocr_tools.py` and `analyze_filename.py` already handles this ordering. No new work needed, just worth testing against a real French-stamped photo to confirm.
-- **OCR + Japanese** — still needs the `tesseract-ocr-jpn` language pack and kanji-aware parsing patterns, as already documented in `ocr_tools.py`'s known limitations. Unchanged status: real, scoped, not started.
-- **GUI localization (en/fr/jp)** — no GUI exists yet, so this is really a *requirement on the GUI's architecture* from day one: build it with a strings/translation-table pattern from the start rather than hardcoded English text, so language support doesn't mean retrofitting later. Worth deciding as part of GUI v0.1's design, even if only English ships first.
+- `generate_test_data` creates disposable synthetic fixtures for the main pipeline and media classification.
+- `chronovault.sh` provides an isolated manual end-to-end workflow under `chronovault_test/`.
+- `test_functions/` contains focused environment and behavior scripts. It is a manual verification collection, not an automated unit/integration test suite.
+- The repository has no package manifest, formal test runner, CI configuration, formatter, or linter configuration.
 
-### GUI v0.1 — right-side tool panel, archive-source safety check, and diagnostic/logging system added
+## Known gaps and risks
 
-**Real crash found and fixed in Generate Report itself** — the one feature whose entire job is helping when something's wrong, failing silently was the worst possible outcome. `_describe_tool_config()` assumed every `gui_config.json` tool entry had a `config` key, but `test_env` and `generate_test_data` both genuinely have none (neither needs one) — hit a raw `KeyError` the moment the report loop reached either. Fixed with `.get('config')` and a clear "(none -- this tool takes no config file)" line instead of a crash. Verified directly against the exact real, deployed `gui_config.json`, confirming no crash and both no-config tools reported correctly.
+### Data integrity and transaction boundaries
 
-**Separately, `_run_diagnostic_report()` itself had no failure handling at all** — the log entry for "generated" was written optimistically *before* attempting generation, and an exception during generation propagated straight to the terminal with zero visible sign in the GUI that anything had gone wrong (matching exactly what was reported: a terminal traceback, app still running, no on-screen feedback, and the log entry itself missing despite being "logged first"). Fixed: generation is now wrapped in a try/except; on failure, the log records what actually happened (`"Diagnostic Report generation FAILED: ..."`, not an optimistic assumption), the output panel shows a clear message, and a blocking dialog ensures it can't be missed. On success, the log entry is now written *after* confirming success, not before.
+1. **Cross-database duplicate prevention.** Condition Database deduplicates within `located_files.db`, but no pre-copy step rejects a hash already present in `archive_database.db`. This is the highest-value safety improvement for repeated scans of read-only sources.
+2. **Condition/import date divergence.** Importer recomputes date evidence rather than consuming the conditioned result. It also never enables OCR, so conditioned and archived dates can differ.
+3. **Classification ownership.** Classify Media sets `media_excluded`, but Importer selects both `located` and `excluded` statuses and does not consult that flag. The intended owner of final eligibility needs to be made explicit.
+4. **Non-atomic import.** Importer copies the file, marks the source row `imported`, and then inserts the archive row. A failure between those steps can leave disk and databases inconsistent.
+5. **Non-atomic correction.** `write_data` moves a file before updating its row. A later database failure can strand the moved file.
+6. **Partial-copy handling.** Interrupted copies have no temporary-name/finalize protocol, so incomplete destinations may look final.
+7. **Destination collisions and retries.** Name allocation depends on current disk state. Stale database rows and repeated corrections can produce confusing suffixed names.
+8. **Schema governance.** Tables evolve through independent `PRAGMA table_info`/ `ALTER TABLE` calls, without a schema version, foreign keys, check constraints, or explicit operational indexes.
 
-**A second, complementary archive safety check added:** the first check (above) catches pointing *Source* at an existing archive by accident; this one catches pointing *Archive* at the wrong folder when creating a brand-new one. Found via a real mistake: generating test data into a folder, then pointing Import at that *same top-level* folder, put `archive_database.db` and the date folders directly alongside the unrelated generated test data — Importer did exactly what it was told, but nothing had asked whether that was intended. `check_archive_destination()` in `gui_data.py` classifies the Archive folder into three states before Importer's first write: already an archive (proceed silently), empty/nonexistent (proceed silently — a blanket "are you sure?" on every new archive would just be friction people click through), or has other content but no database (the one genuinely ambiguous case, worth a real pause). That third case offers a one-click fix, not just a warning: redirect to a dedicated `<folder>/archive` subfolder, which updates the Archive field and continues, rather than cancel → browse again → retype. Verified directly against all four states, including a reconstruction of the exact reported scenario. Scoped to Importer only — Audit Archive and Duplicate Finder already fail cleanly on their own against a folder with no `archive_database.db`, since they only ever read an existing archive, never create one.
+### Audit and reconciliation
 
-**Panel grouping now reflects frequency of use, not just category:** Tools (day-to-day pipeline) → Diagnostics (occasional checks) → Utilities (one-off setup / crash-only), each visually separated. Test Retrieve Data added to Diagnostics; Generate Test Data added to Utilities, right above Generate Report — deliberately grouped together per the explicit reasoning that neither is part of normal running the app.
+- Audit Archive applies its configured extension filter while walking disk. A documented database row whose file has a currently excluded extension can be reported missing even when it exists.
+- The misplaced-file check derives an expected `YYYY/MM/DD` path from the first three relative path components. Deeper or nonstandard layouts can evade or confuse it.
+- Recommendations for undocumented files use a separate EXIF/filesystem heuristic instead of shared `analyze_date`, so audit and import can disagree.
+- Audit and Duplicate Finder cache hashes without recording file size/mtime or another freshness key. Replaced-in-place files can retain stale hashes.
+- Neither tool offers an approved repair workflow; reports require manual interpretation.
 
-**Real bug fixed in `test_retrieve_data.py`, found before it ever reached the GUI:** the script hardcoded its archive location as a Python constant (`ARCHIVE_ROOT = "archive"`), which would have silently looked in the wrong place for anyone using a NAS, network share, or removable drive — exactly this project's real-world case, where the same physical drive can mount at a different path every time it's replugged. Fixed to read `archive_root` from a config file (`test_functions/test_retrieve_data_config.json`), matching every other archive-aware tool, so the GUI's existing `update_archive_root_in_config` sync mechanism works here with zero special-casing. Verified directly: relative and absolute `archive_root` values, a deliberately-missing review-bucket file (confirming the `[FILE MISSING ON DISK]` path), and all three error paths (no argument, missing config, config missing `archive_root`).
+### Source freshness and indexing
 
-**Real bug found and fixed in the write-permission check for Generate Test Data:** the original implementation used `os.access(folder, os.W_OK)`, confirmed directly to be unreliable in exactly the situations this project cares about most — it reports a folder as writable whenever the GUI happens to run as root regardless of actual permission bits (root bypasses Unix DAC checks entirely; confirmed by an actual write succeeding against a `chmod 444` directory), and is also known to misreport on FAT32/exFAT removable drives (this project's primary real-world case) and NAS/NFS/SMB shares, where reported permission bits don't always reflect what's actually enforced. Fixed with `check_folder_writable()` in `gui_data.py`, which attempts a real write (temp marker created then removed) instead of inferring from metadata. Verified against both root-bypass cases (correctly reports writable) and genuine structural failures that fail regardless of root — a nonexistent parent path, and a path that's actually a file, not a directory (both correctly reported as not writable).
+- Re-indexing an existing path does not refresh size or timestamps because `file_path` uniqueness turns rediscovery into an ignored insert.
+- Relative database, source, archive, and report paths remain dependent on the process working directory.
+- Archive member matching stops after 500 names. `matching_file_count` is therefore a stored capped-list length, not necessarily the archive's full match count.
+- A later successful archive listing can clear a previous failure note, which loses failure history.
+- Run summaries can mix newly inserted rows with previously known paths in ways that obscure what changed.
+- Archive extraction, password handling, and RAR/7z content support are not implemented.
 
-**Panel now grouped**, per real usage feedback: a visual separator (`QFrame`, `HLine`) splits the right panel into **Tools** (Condition Database, Audit Archive, Duplicate Finder — all touch `located_files.db` and/or the archive) and **Diagnostics** (Test Environment, read-only, no pipeline data touched), with Generate Report pinned to the bottom via a stretch. "Generate Diagnostic Report" shortened to "Generate Report" — the original label clipped in the panel's 170px width.
+### Date evidence
 
-**Test Environment wired in** — the first genuinely zero-prerequisite addition since the initial panel build: `test_env.py` takes no arguments, no config file, and resolves every path it checks relative to its own script location rather than the current working directory, so none of the archive-path-syncing concerns that affected Audit Archive/Duplicate Finder apply here at all.
+- Agreement uses integer `timedelta.days`, so the configured threshold is not a precise elapsed-time tolerance.
+- GPS, EXIF, and XMP values are compared without a complete timezone model; XMP offsets are discarded rather than normalized.
+- The XMP parser reads element text but can miss common RDF attribute forms.
+- `analyze_date/config.json` is not loaded by the analyzer.
+- OCR is opt-in and expensive. When Condition Database enables it, it is attempted for every supported image rather than only weak cases.
+- `audio_tools/` and `video_tools/` are placeholders. ID3, BWF, QuickTime/MP4, HEIC/RAW, IPTC, external XMP, Takeout JSON, and known-date hash twins remain future work.
 
-**Confirmed working end-to-end via a real full-pipeline GUI session** (Index → Condition Database → Import → Audit Archive → Duplicate Finder), captured via Generate Report: 1,772 imported + 15 pre-import duplicates (caught by Condition Database) = 1,787 processed, 0 duplicates remaining at the archive level (confirming Condition Database's pre-import dedup is doing its job — nothing left over for Duplicate Finder's archive-mode pass to find), Importer correctly reporting "nothing to do" on a second run against already-imported files.
+### GUI, configuration, and portability
 
-**Right-side panel added**, deliberately separate from the main Index/Import flow, so every other tool can get a button without reworking the main layout each time it grows. Now wired: **Condition Database**, **Audit Archive**, **Duplicate Finder**, and (pinned to the bottom) **Generate Diagnostic Report**. All action buttons (five, up from two) disable together while any one is running.
+- GUI path synchronization only affects tools mapped to a config entry. Each tool still owns its path configuration, so drift is possible outside the GUI.
+- Some scripts and manual tests assume particular working directories or fixture layouts.
+- The GUI's executable probe is fixed and its subprocess stop action is abrupt.
+- Optional dependencies and external executables are reported by environment checks, but installation is manual.
 
-**Real bug found and fixed via actual GUI use, not review:** pointing both Source and Archive at the same existing archive caused Indexer to re-discover every already-organized photo as "new," and Importer to re-copy each one into itself as `(1)`/`(2)` duplicates — every tool behaved correctly given its input; the situation was still entirely wrong. Fixed with `looks_like_chronovault_archive()` in `indexer.py` (checks for `archive_database.db` at the search root, before any database access happens) plus a `--allow-archive-source` override for deliberate migration/consolidation. The GUI reuses the identical function (imported directly from `indexer.py`, not a separate copy) and shows a confirmation dialog defaulting to **No**.
+### Tests and generated data
 
-**A second real bug, found immediately after the first fix shipped:** Audit Archive and Duplicate Finder were deliberately left un-synced with the GUI's Archive field (reasoning: "supplementary tools, not part of the main flow"). This was wrong in practice — a real test session using a custom archive location had Importer succeed against the real path while these two silently checked the stale default (`"archive_root": "archive"`, relative to the project root) instead, both failing with a correct but confusing `Archive root 'archive' does not exist`. Fixed by making `update_archive_root_in_config()` mode-aware (skips writing `archive_root` if a config's `mode` key is present and set to anything other than `"archive"` — relevant only to Duplicate Finder's source/archive dual-mode config) and applying it to all three archive-touching tools consistently. Verified directly against all three mode scenarios (no mode key, `mode="archive"`, `mode="source"`).
+- Test helpers are mostly print-and-inspect scripts with limited assertions and no isolation framework.
+- Some tests mutate review data and are safe only against disposable fixtures.
+- Fixture generation does not clean an existing output tree unless the caller does so.
+- Date-relative fixtures depend on the current clock, which limits reproducibility.
+- Coverage is incomplete for failure injection, interrupted copies/moves, migration order, stale caches, path collisions, and real ISO success.
 
-**Persistent activity log + crash detection, built into `gui_settings.ini`:** a fixed-size circular buffer (50 numbered slots, `entry_0`..`entry_49`, plus a persisted `next_index` counter deciding which slot gets written next) records every button press, tool launch, and outcome. Chosen deliberately over a simpler "rewrite the whole list every time" design: the persisted index means a restart after a crash doesn't reset to slot zero, so events leading up to a crash aren't at risk of being overwritten until the buffer wraps all the way back around (50 more events later), not on the very next restart. Reading the log back sorts by each entry's own embedded microsecond timestamp rather than trusting slot order, since slot order stops matching chronological order the moment the buffer wraps around even once — verified directly by writing 75 entries and confirming exactly the most recent 50 survive, in correct order.
+## Planned work
 
-Every clean shutdown writes a specific marker as the final event. At startup, if the previous session's last recorded event isn't that marker, the GUI infers an unclean exit (crash, force-quit, lost connection) and notes it in the output panel — not a blocking popup, since a startup dialog for what might be an ordinary force-quit would be more annoying than useful. Verified directly through the full lifecycle: fresh install (no false crash flag), clean shutdown + restart (correctly not flagged), and a simulated crash + restart (correctly flagged, with the exact last event captured in a WARNING log entry).
+### Priority 1: protect archive integrity
 
-**Generate Diagnostic Report**, bottom-right button: a plain-text report combining environment info, current field values, the last 50 log entries in correct chronological order, every tool's resolved config values (`database_path`/`archive_root`/`mode`) with existence checks, and database row counts by status — meant to be pasted directly when asking for debugging help. Read-only, uses a read-only SQLite connection, and isn't blocked by another tool running (deliberately — that's often exactly when it's needed). Simulating the real session that surfaced the archive-sync bug above confirmed this report would have shown the exact path mismatch immediately, rather than needing several back-and-forth messages to diagnose.
+- Add an archive-hash cross-check before copying and define how corrected/high-confidence archive records supply the canonical known date.
+- Make import and correction transitions recoverable: temporary destination names, verified copy completion, coordinated database updates, and explicit restart behavior.
+- Resolve whether Importer consumes conditioned date/classification fields or owns recomputation; then make status and `media_excluded` semantics consistent.
+- Add cache invalidation metadata and verify hashes when a file's size or modification time changes.
+- Add failure-injection tests around copy, move, and database boundaries.
 
-**Also fixed along the way:** the missing-`libxcb-cursor0` Linux startup crash (`sudo apt install libxcb-cursor0` — a missing system library Qt 6.5+ needs for its X11 cursor-theme support, not a Python or code issue), and a real self-inflicted bug in an earlier delivery of `gui_data.py` where a botched edit merged two functions' bodies together, silently deleting `update_archive_root_in_config` as a callable name (caught by the resulting `ImportError`, fixed, and re-verified this time by actually importing and calling every expected function, not just checking that the file compiles — `py_compile` cannot catch dead code after a `return` statement, which is exactly what the bug was).
+### Priority 2: make reconciliation actionable
 
-### GUI v0.1 — first pass built (Index + Import only), several real design decisions made along the way
+- Align Audit Archive's file discovery and date recommendation with the importer's supported media and shared analyzer.
+- Expand audit output to distinguish filtered, missing, undocumented, misplaced, stale-hash, and database-collision cases reliably.
+- Design a dry-run-first repair path. It must never silently delete originals or choose a duplicate winner.
+- Add archive-level duplicate prevention and a separate human review flow for existing duplicate groups.
 
-**What's actually built:** `chronovault.py` (top-level launcher, run from the project root) and `gui/` (`chronovault_gui.py` — the Qt window; `gui_data.py` — non-Qt config logic, deliberately separated so it's testable without Qt installed at all, same reasoning as `retrieve_data` being UI-agnostic). Source folder field + Browse, Archive folder field + Browse, Index button, Import button, a status line, and a live-streaming read-only output panel. Both action buttons disable while either tool is running, specifically to prevent two tools ever writing to the same database at once.
+### Priority 3: stabilize paths, migrations, and repeat runs
 
-**Framework:** PySide6 (LGPL, official Qt bindings) — `pip install PySide6 --break-system-packages`, pure Python, no system packages needed. Added to `test_env.py` as an optional check.
+- Adopt consistent path resolution independent of the launch directory, while preserving portable relative configurations where intentional.
+- Introduce schema versioning and ordered migrations for both SQLite databases.
+- Refresh mutable metadata for previously indexed paths and clarify incremental-run summaries.
+- Finish ISO success-path verification; decide whether RAR/7z listing is worth its external dependencies.
+- Preserve archive-listing failure history and distinguish truncated match lists from complete counts.
 
-**Two config files, deliberately split:** `gui/gui_config.json` (static, checked into git — where each tool's script/config live, paths relative to the project root) and `gui/gui_settings.ini` (dynamic, personal, gitignored — last-used folder paths, via Python's built-in `configparser`, no new dependency).
+### Priority 4: formalize verification
 
-**How the archive path reaches Importer:** the GUI doesn't invent a parallel configuration path. Right before launching, it reads `importer/config.json`, updates only `archive_root`, and writes it back — every other hand-configured key is read and preserved untouched. Verified directly: a config with extra keys (`min_file_size_bytes`, `exclude_path_contains`) round-trips with only `archive_root` changed. Importer itself remains completely unaware a GUI exists.
+- Build automated unit tests for date parsers/scoring and database migrations.
+- Add isolated integration tests for the full pipeline, reruns, collision naming, stale files, hidden folders, archive guards, and interrupted operations.
+- Make fixture generation deterministic with an optional seed/reference time and an explicit safe-clean mode.
+- Add a minimal dependency/package definition and CI only after the supported runtime/dependency policy is decided.
 
-**Not sandboxed to `chronovault_test/`** — this GUI operates against real folders from the start, since neither Indexer nor Importer delete or modify source files. `chronovault.sh` remains the safe, contained testing path; the GUI is the real-use path.
+### Priority 5: broaden evidence and media support
 
-**Deliberately deferred, not forgotten:**
-- **Stop button** — needs `store_files()`'s commit behavior fixed first (currently one commit at the very end of a whole scan; `store_archives()` already commits per-archive). Until fixed, killing Indexer mid-run loses the entire run's findings, not just what came after the interruption.
-- **Verify Status dialog** (path/dependency/archive/config-key sanity, found in a Help/Tools menu — placement follows frequency of use, not just logical grouping) — needs a single shared "expected keys per config" definition that a future `--init` flag will also use, so the two can never quietly disagree about what "correct" looks like.
-- **Visual styling** — default Qt/Fusion for now; QSS stylesheets or a theme package (`qt-material`, `PyQtDarkTheme`) can deliver a genuinely modern look later without a framework change. Mechanics first, polish second.
+- Correct exact-duration agreement and timezone normalization before adding more high-confidence signals.
+- Support XMP RDF attributes and broader still-image metadata.
+- Add audio tag and video container extractors in their existing placeholder packages.
+- Evaluate external sidecars, Takeout metadata, HEIC/RAW support, and archive-known hash/date evidence.
+- Keep speculative content inference and OCR as review aids rather than automatic authority.
 
-**`--init` flag (discussed, not yet built, revisit per-tool as each is next touched):** a `--init` flag for each tool (starting whenever that tool is next modified) that regenerates a clean, default `config.json` — never destructively; the existing file gets renamed to `config.json.bak` first, never silently overwritten. A full reset, not a smart partial repair — simpler and more predictable. This exists specifically so a GUI that edits config files (like this one now does) has a built-in, terminal-usable recovery path if it ever corrupts one — the fix doesn't depend on the GUI itself working.
+## Candidate review and archive extraction
 
-**Indexer robustness work needed to support Stop/heartbeat (not yet built):**
-- **Batch commits — ✅ Done.** `store_files()` now commits every 100 files instead of once at the very end. Verified two ways: correctness (250 test files, insert/skip counts and a re-run's idempotency all match exactly), and the actual property this exists for — a real subprocess running `store_files()` was `SIGKILL`ed partway through (no cleanup, no chance to run any final commit), and 200 of the 225 files processed by that point survived on disk, confirming committed batches are genuinely durable, not just theoretically safer. Broader `OSError` handling for the walk itself (item #3, disconnected-drive robustness) deliberately done as a separate pass, not bundled in — kept independently testable.
-- **Broader `OSError` handling — ✅ Done.** `find_files_and_archives()` now catches `OSError` generally instead of only `PermissionError`, and — combined with the batch-commit fix above — returns whatever was found *before* an interruption instead of discarding it, so a mid-scan I/O error no longer throws away the whole run. Verified with a genuine non-`PermissionError` `OSError` (`errno 5`, "Input/output error" — the kind a disconnected drive actually raises) injected mid-walk: caught cleanly, partial results preserved, clear warning printed, exits non-zero without raising (so a GUI sees "finished with a problem," not a crash). Normal operation re-confirmed unaffected.
-- Periodic progress output every ~100 files (same cadence as the commits) — showing both a running count and the current path being scanned, e.g. `...still scanning (1,500 found so far) — currently in: /mnt/backup/Pictures/2019`. Serves both as user-facing heartbeat and as a crash-diagnostic checkpoint (see below) from the same piece of data.
-- **New `indexer_runs` table** in `located_files.db`, one row per distinct `search_root` (overwritten on each new scan of the same location — "latest state," not a full history log, per explicit decision: the real use case is periodically re-scanning the same phone/drive, not needing a timeline of past scans). Tracks `status` (`in_progress`/`completed`), `last_seen_path`, `files_found_so_far`. A dangling `in_progress` row found at the start of a new scan is itself the crash signal — no separate crash-detection logic needed. The GUI would surface this as: *"A previous scan of this location didn't finish — it stopped around X. This could mean a crash, a disconnected drive, or a problem file nearby. Continue?"* — explicitly a diagnostic clue, **not** a resume-without-rescanning shortcut (re-running is already database-safe today via `file_path`'s `UNIQUE` constraint + `INSERT OR IGNORE`; a true fast-resume would require reliably seekable filesystem walk order, which isn't guaranteed and isn't being built).
-- **Known limitation, accepted for now:** tracking is by path string, not physical device identity. The same drive remounting at a different path looks like "never seen before." A UUID-based approach is real, worthwhile, platform-specific work — not v0.1.
-- **Symlinked directories:** tested directly — on Python 3.12, `Path.rglob()` does not descend into symlinked directories at all (confirmed with both a genuine loop-back symlink and a legitimate symlink to a separate directory — neither got its contents listed). No infinite-loop risk today, but also means legitimate symlinked content (e.g. a NAS reorganized via symlinks) is silently skipped. A `follow_symlinks` opt-in flag (default `false`), matching `look_inside_archives`'s pattern, is a reasonable future addition if this ever turns out to matter for a real setup.
-- **`.lnk` files are a non-issue, clarified for the record:** Windows shortcut files are ordinary, inert files interpreted only by Explorer — not a filesystem-level link mechanism at all, and not something `pathlib` ever traverses into. The real equivalent risk (NTFS junctions / directory symlinks) would behave like the tested Linux case, but this wasn't directly verified on Windows.
+A shared candidate workflow is a useful future foundation for ambiguous-photo classification and extracted archive members. It is not implemented.
 
-**Future enhancement, logged, not scoped yet: DVD/optical-media identification by volume label.** A burned DVD's volume label is embedded in the disc's own ISO9660/UDF filesystem metadata at burn time and is permanent (read-only media can't be relabeled) — a more trustworthy identity marker than a USB drive's mutable label. On Linux, many desktop environments already auto-mount removable media at a path that includes the volume label (e.g. `/media/you/FAMILY_PHOTOS_2003`), so simple path-based tracking may already capture disc identity reasonably well there for free. On Windows, a DVD gets a drive letter with no relationship to the label, so path tracking would not distinguish between different discs. A robust, path-independent version would mean reading the label directly from filesystem metadata — real, platform-specific code (`blkid`/`lsblk` on Linux, `GetVolumeInformation` via `pywin32` on Windows) — not attempted yet.
+A possible model is:
 
-### Archive/compressed-file scanning (ISO, ZIP, tarballs) — location detection + content listing DONE, extraction not yet built
+- a `candidate` source status for a discovered item that requires a decision;
+- a separate pending/approved/rejected decision field so rejection is not confused with config-driven `excluded`;
+- read-only listing functions returning serializable records;
+- explicit write functions that approve or reject selected IDs;
+- approval changing the item to normal import eligibility;
+- terminal-first verification, followed by GUI integration.
 
-Real gap that prompted this: media can be sitting inside a `.zip`, `.tar`/`.tar.gz`, or `.iso` on an old drive, and Indexer used to walk right past it entirely.
+The exact schema, provenance fields, lifecycle, and interaction with classification must be designed before migration code is written. The proposed tables and columns in `Database_schema.md` are not current database objects.
 
-**What's actually built now** (implemented directly in Indexer, not as a separate `archive_scanner` tool as originally sketched below — a design that changed once we got into it):
+Archive extraction should use this review boundary rather than auto-importing opaque members. It also needs safe staging, path traversal protection, password/error reporting, provenance back to the containing archive, and cleanup rules.
 
-- **Detection is unconditional.** Indexer recognizes a configurable list of archive extensions (`archive_extensions` in `indexer/config.json`, default `zip`/`tar`/`tar.gz`/`tgz`/`iso`) during its normal walk and records every archive's location in a new `located_archives` table, regardless of any other setting. This never opens the archive — as cheap as noting a normal file's path.
-- **Content listing is opt-in** via `look_inside_archives` (default `false`). When on, Indexer also lists which member files inside each archive match the configured media `extensions` — via `zipfile`/`tarfile` (stdlib, no new dependency) for ZIP/TAR, and `pycdlib` (optional dependency, gracefully degrades with a clear note if not installed) for ISO. No extraction happens in either case — only reading headers/central-directory/filesystem-structure, never file contents.
-- **Turning the flag on later backfills, rather than requiring a rescan.** An archive already on record (location only) from an earlier run gets its contents listed on a later run once the flag is turned on — Indexer doesn't need to re-walk the whole source drive just because a config value changed. An archive whose contents were already successfully listed is never re-listed, the same "don't redo work already done" principle used for hashing elsewhere.
-- **Failure is contained per-archive.** A corrupt/unreadable archive, an unsupported type (e.g. `.rar` added to `archive_extensions` without a built-in lister), or a missing `pycdlib` all result in the archive's location still being recorded, with a specific note explaining what went wrong — never a crash that stops the rest of the run.
-- Verified directly against real ZIP and TAR.GZ test archives with known contents (correct inclusion/exclusion of matching vs. non-matching members), a genuinely corrupt ZIP (clean failure, not a crash), and the ISO-without-pycdlib path (clean degradation). `pycdlib` is now installed — the pycdlib-*present* ISO-listing path is still not yet verified against a real ISO (none was available during development); **holding this open until a real ISO file is found to test against**, since the graceful-degradation path being correct doesn't prove the success path is.
-- `generate_test_data.py` now generates two real archives (`Archives/old_photos_backup.zip`, `Archives/old_photos_backup.tar.gz`), built from already-generated `match` files rather than placeholder content — gives Indexer's archive detection and content-listing something genuine to open. Verified end-to-end: both detected regardless of `look_inside_archives`, and with it on, the exact filenames inside each are correctly listed.
+## Longer-term product work
 
-**Still not built:** anything that acts on `matching_files` once listed — i.e., actually extracting those specific members to a staging folder so they can be reviewed and imported. That's the piece the original 2-step sketch below called "Step 2" — listing now exists, extraction doesn't yet. When it's built, extracted files should land in `located_files.db` with the **candidate** status described below (not auto-imported), going through the same candidate-review mechanism as everything else pulled in through a non-obvious path.
+- A media browser with thumbnails, date ranges, evidence details, review actions, and duplicate-group decisions.
+- Manual labels and optional machine-generated suggestions for people, places, events, and content. Label tables remain proposed only.
+- GPS reverse geocoding with a local-first/privacy-conscious provider strategy.
+- Richer document, audio, and video workflows.
+- Localization architecture before translating the GUI; French date-folder parsing exists, but GUI localization and Japanese OCR/date notation do not.
+- An optional source-cleanup workflow only after content verification, archive integrity, permissions, and physical read-only media are handled explicitly. Source deletion is not part of the current product contract.
+- True forensic undelete, if ever pursued, should wrap established tools such as PhotoRec/TestDisk rather than reimplement recovery.
 
-Open question, not yet decided: whether `.rar`/`.7z` are worth supporting given they need external dependencies Python doesn't handle natively (`rarfile`/`py7zr`, both often shelling out to a system binary) — Indexer will detect and record them today if added to `archive_extensions`, just without content listing.
+## Explicit non-goals for current automated behavior
 
-### "Camera photo" discrimination filter — newly raised, not yet built
+- Deleting source originals.
+- Automatically deleting duplicates or selecting a “winner.”
+- Treating edit/tagging/filesystem timestamps as authoritative capture dates without corroboration.
+- Filing speculative ML/ASR guesses without human review.
+- Presenting candidate, labels, archive extraction, or repair schemas as implemented.
 
-Real gap: today, "search for `.jpg`" means *every* `.jpg` — including web cache thumbnails, favicons, and logos nobody wants archived. The actual desire is closer to "photos actually taken with a camera, or scanned documents/photos" — a meaningfully different (and fuzzier) question than "does the extension match."
+## Decision log carried forward
 
-**Confirmed 2-step approach**, mirroring the archive-scanning shape above — Indexer still just scans and scores, a person still makes the actual call:
-
-- **Step 1 (Indexer).** While indexing images normally, compute a lightweight "possible photo" signal per file — not a hard filter, closer to `analyze_date`'s "evidence in, scored answer out" pattern (a natural reuse of a pattern already proven here, not a new one invented from scratch). Files split into three outcomes, not two:
-  - **Confident camera photo** (real EXIF camera tags present) — indexed normally, no extra prompt needed.
-  - **Confident non-photo** (tiny file size, indexed/palette color, filename patterns like `icon_`/`sprite_`) — excluded normally, no extra prompt needed.
-  - **The ambiguous middle** — no EXIF, but a plausible sensor-like aspect ratio (4:3, 3:2, 16:9) *and* high color definition (truecolor) rather than a fixed/indexed palette. These are the ones that actually need a person's judgment — e.g. a photo that had its EXIF stripped by a messaging app export, vs. a genuinely non-camera image that happens to be a normal shape.
-  - End-of-run report calls this middle tier out explicitly: *"I found these images that might possibly be photos taken by a camera: [list]. Would you like to include them?"*
-- **Step 2 (candidate review).** The ambiguous-tier files land in `located_files.db` with the same **candidate** status as archive-scanner finds — reviewed and approved/rejected the same way, through the same mechanism, rather than needing a second bespoke review flow.
-
-Additional signals worth folding into the scoring later, once the basic three-way split above is working: DPI metadata (scans often 300 DPI vs. 72 for web graphics) and a distinct scanned-document sub-case (high DPI + page-like aspect ratio + low color variance) — a positive case in its own right, not just "not a web graphic."
-
-### Candidate review mechanism — newly identified as a shared dependency, not yet built
-
-Both features above produce the same underlying need: a list of files Indexer/`archive_scanner` found but isn't confident enough to import automatically, that a person has to explicitly approve or reject. Today there's no such concept — Importer only ever acts on `status='located'`/`status='excluded'` rows, both of which assume the *filter logic itself* already made the call.
-
-Proposed design, following the exact split already proven by `retrieve_data`/`write_data`:
-
-- **New `located_files.status` value: `candidate`.** Distinct from `located` (indexed, eligible, no open question) and `excluded` (filtered out by config, re-evaluated each run). A candidate row means "found, but a person needs to decide."
-- **Rejection is a separate flag, not a status change.** A new column (`candidate_decision`, say — `NULL`/`pending`, `approved`, `rejected`) sits alongside `status` rather than status moving to `excluded` on rejection. Reasoning: `excluded` already carries its own meaning (a config filter caught it, re-evaluated fresh every Importer run) — collapsing "a person deliberately said no" into that same bucket would blur two genuinely different things, and `excluded`'s automatic re-evaluation isn't the right behavior here anyway. A rejected candidate should stay exactly as rejected until a person revisits it on purpose.
-  - This also means **no rework.** Whatever produced the candidate in the first place — extracting a file from an archive, scoring an ambiguous image — never has to be redone if someone changes their mind later. The row, and whatever evidence/score got attached to it, just sits there with `candidate_decision='rejected'` until flipped.
-  - Approving sets `candidate_decision='approved'` **and** flips `status` to `located`, so Importer picks it up on its next normal run — approval is the one decision that actually needs to change `status`, since that's what makes a row eligible for import at all.
-  - A rejected candidate can be revisited at any time — re-running the review tool would naturally show pending items by default, with an option to also list previously-rejected ones in case someone wants to reconsider.
-- **Read side** — a `list_candidates()`-style function, same shape as `list_review_items()`: plain dicts, JSON-serializable, no assumption about terminal vs. future GUI. Would reasonably support filtering by decision (`pending`, `rejected`, or all) and grouping by *why* something became a candidate (archive-extracted vs. ambiguous-photo-score), so a person can review one batch at a time rather than one giant undifferentiated pile.
-- **Write side** — an `approve_candidates()`/`reject_candidates()` pair (or a single function taking a decision per id), same "already-decided structured input in, plain dict report out" shape as `apply_date_correction()`.
-- Terminal-first, same convention as everything else — a `test_functions/`-style script or a `chronovault.sh` menu option would be the first real front end, with the GUI later just calling the same functions, exactly the same relationship `retrieve_data`/`write_data` already have to a hypothetical future GUI.
-- This turns out to be the more foundational piece of the two features above — worth building this shared mechanism first, with archive-scanning or photo-discrimination as the first real *producer* of candidates to prove it end to end, rather than building either feature with its own one-off review flow.
-
-## Suggested Priority Order
-
-Given everything above, roughly in order of "smallest effort for real value":
-
-1. **Documentation debt** — now closed (`multi_tools/README.md`, `condition_database/README.md` both exist).
-2. **Hidden-folder scan verification** — one test case, confirms something that's *probably* already fine.
-3. **Archive-hash pre-copy skip (5b)** — small, closes a real functional gap in `condition_database`.
-4. **GUI v0.1** — button-launcher, proves the GUI shape works before investing in anything fancier.
-5. **Candidate review mechanism** — foundational for both archive-scanning and camera-photo discrimination below; worth building before either, since both need it and it's smaller and more self-contained than either.
-6. **Everything else** (delete-originals tool, AI labeling, ID3/MP4 signals, adjacent-files inference, French/Japanese depth, archive/compressed-file scanning, camera-photo discrimination) — larger, worth picking one at a time as they become the actual next priority.
+- Keep `located_files.db` disposable and `archive_database.db` persistent.
+- Keep retrieve operations read-only and corrections behind an explicit write boundary.
+- Keep low-confidence dates visible in `_review_needed/` rather than guessing silently.
+- Favor small tools and shared pure logic over duplicating behavior in the GUI.
+- Preserve originals and prefer reversible, report-first operations.
