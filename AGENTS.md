@@ -103,3 +103,15 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 Use [roadmap.md](roadmap.md) for the maintained backlog and risk register. Confirm current behavior in source before implementing a roadmap item because priorities and accepted limitations can outlive the code that motivated them.
 
 Historical rationale in `AGENTUPDATE.md` or `CHRONOVAULT_HANDOFF.md` may explain why a design arose, but much of their status information is obsolete. Consult them only when the audited documentation and implementation do not answer a rationale question, and never resurrect an old TODO without verifying it against `roadmap.md` and current source.
+
+## Fresh-session bootstrap
+
+When starting a new AI development session:
+
+1. Read this file.
+2. Read `CHRONOVAULT_HANDOFF.md`.
+3. Run `./recontext.sh`.
+4. Use the latest `context-baseline-*` tag and the reported Git changes to determine what project knowledge may have changed since the last reviewed checkpoint.
+5. Follow the task-routing guidance in this file and load only the documentation and source relevant to the current task.
+
+Do not scan the entire repository unless the requested work is genuinely repository-wide.
