@@ -1,7 +1,19 @@
 {
-    "database_path": "located_files.db",
-    "output_report_path": "classification_report.json",
-    "image_extensions": ["jpg", "jpeg", "bmp", "tif", "tiff", "png", "gif", "webp", "thm"],
-    "exclude_categories": ["certain_not"],
+    "database_path": "/home/omoikane/workspace/ChronoVault/chronovault_test/indexer/located_files.db",
+    "output_report_path": "/home/omoikane/workspace/ChronoVault/chronovault_test/reports/classification_report.json",
+    "image_extensions": [
+        "jpg",
+        "jpeg",
+        "bmp",
+        "tif",
+        "tiff",
+        "png",
+        "gif",
+        "webp",
+        "thm"
+    ],
+    "exclude_categories": [
+        "certain_not"
+    ],
     "force_reclassify": false
 }

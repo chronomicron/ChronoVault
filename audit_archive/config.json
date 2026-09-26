@@ -1,4 +1,5 @@
 {
     "archive_root": "/home/omoikane/workspace/ChronoVault/chronovault_test/archive",
-    "extensions": []
+    "extensions": [],
+    "output_path": "/home/omoikane/workspace/ChronoVault/chronovault_test/reports/audit_result.json"
 }
