@@ -2,8 +2,8 @@
 gui/gui_data.py
 
 Non-GUI logic for the ChronoVault GUI: locating the project root, loading
-the static tool-location config (gui_config.json), and safely updating a
-tool's config.json (currently just Importer's archive_root) before a run.
+the static tool-location config (gui_config.json), and safely updating the
+paths shared by the GUI-launched tools.
 
 Deliberately has NO PySide6 import anywhere in this file -- kept separate
 from chronovault_gui.py specifically so this logic is testable entirely
@@ -30,6 +30,72 @@ PATHS_SECTION = 'paths'
 LOG_SECTION = 'log'
 MAX_LOG_ENTRIES = 50
 CLEAN_SHUTDOWN_MARKER = "Application closed (clean shutdown)"
+
+
+def get_test_folder_paths(test_folder):
+    """Return the complete, compartmentalized path layout for one test workspace."""
+    root = Path(test_folder).expanduser().resolve()
+    reports = root / "reports"
+    return {
+        'test_folder': str(root),
+        'indexer_folder': str(root / "indexer"),
+        'source_folder': str(root / "test_data"),
+        'archive_folder': str(root / "archive"),
+        'reports_folder': str(reports),
+        'database_path': str(root / "indexer" / "located_files.db"),
+        'classification_report_path': str(reports / "classification_report.json"),
+        'condition_report_path': str(reports / "condition_report.json"),
+        'audit_report_path': str(reports / "audit_result.json"),
+        'duplicate_report_path': str(reports / "duplicate_report.json"),
+        'diagnostic_report_path': str(reports / "diagnostic_report.txt"),
+    }
+
+
+def configure_test_folder(gui_config, test_folder):
+    """
+    Create the workspace's standard subfolders and repoint every dependent
+    tool config at that workspace. Existing folders and files are preserved.
+
+    Returns the path dictionary from get_test_folder_paths().
+    """
+    paths = get_test_folder_paths(test_folder)
+    for key in ('indexer_folder', 'source_folder', 'archive_folder', 'reports_folder'):
+        Path(paths[key]).mkdir(parents=True, exist_ok=True)
+
+    updates_by_tool = {
+        'indexer': {'database_path': paths['database_path']},
+        'classify_media': {
+            'database_path': paths['database_path'],
+            'output_report_path': paths['classification_report_path'],
+        },
+        'condition_database': {
+            'database_path': paths['database_path'],
+            'output_report_path': paths['condition_report_path'],
+        },
+        'importer': {
+            'database_path': paths['database_path'],
+            'archive_root': paths['archive_folder'],
+        },
+        'audit_archive': {
+            'archive_root': paths['archive_folder'],
+            'output_path': paths['audit_report_path'],
+        },
+        'duplicate_finder': {
+            'database_path': paths['database_path'],
+            'archive_root': paths['archive_folder'],
+            'output_path': paths['duplicate_report_path'],
+        },
+        'test_retrieve_data': {'archive_root': paths['archive_folder']},
+    }
+
+    tools = gui_config.get('tools', {})
+    for tool_name, updates in updates_by_tool.items():
+        tool = tools.get(tool_name)
+        if tool is None or 'config' not in tool:
+            raise KeyError(f"No configured path for GUI tool '{tool_name}'.")
+        update_values_in_config(tool['config'], updates)
+
+    return paths
 
 
 def load_settings():
@@ -275,6 +341,20 @@ def check_looks_like_archive(source_path):
     return looks_like_chronovault_archive(source_path)
 
 
+def update_values_in_config(config_relative_path, updates):
+    """Update selected keys in one tool config while preserving all other settings."""
+    config_path = Path(config_relative_path)
+    if not config_path.is_absolute():
+        config_path = PROJECT_ROOT / config_path
+
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+
+    config.update(updates)
+    with open(config_path, 'w') as f:
+        json.dump(config, f, indent=4)
+
+
 def update_archive_root_in_config(config_relative_path, archive_path):
     """
     Write a chosen archive folder into a tool's config.json's
@@ -302,7 +382,9 @@ def update_archive_root_in_config(config_relative_path, archive_path):
     instead -- both failed cleanly with "Archive root 'archive' does not
     exist," a correct error, but a confusing and entirely avoidable one.
     """
-    config_path = PROJECT_ROOT / config_relative_path
+    config_path = Path(config_relative_path)
+    if not config_path.is_absolute():
+        config_path = PROJECT_ROOT / config_path
     with open(config_path, 'r') as f:
         config = json.load(f)
 
@@ -310,16 +392,14 @@ def update_archive_root_in_config(config_relative_path, archive_path):
     if mode is not None and mode != 'archive':
         return  # e.g. Duplicate Finder in 'source' mode -- archive_root isn't relevant here
 
-    config['archive_root'] = archive_path
-    with open(config_path, 'w') as f:
-        json.dump(config, f, indent=4)
+    update_values_in_config(config_path, {'archive_root': archive_path})
 
 
 def _describe_tool_config(tool_name, tool_entry):
     """
     One tool's diagnostic block: does its script/config exist on disk,
     and what do the keys that actually matter for this report
-    (database_path, archive_root, mode) currently say -- including
+    (database, archive, report, and mode paths) currently say -- including
     whether whatever path they point to actually exists. Not a full
     config dump; just the keys relevant to diagnosing "why did this
     tool fail," which is this report's entire purpose.
@@ -327,8 +407,8 @@ def _describe_tool_config(tool_name, tool_entry):
     'config' is genuinely optional in gui_config.json -- test_env and
     generate_test_data both have entries with no 'config' key at all,
     since neither needs one (test_env.py takes no arguments at all;
-    generate_test_data's destination comes from an interactive folder
-    picker, not a config file). An earlier version of this function
+    generate_test_data's destination comes from the Test folder field,
+    not a config file). An earlier version of this function
     assumed every tool entry had a 'config' key unconditionally, which
     crashed with a raw KeyError the moment the report generator reached
     either of those two entries -- caught via a real run, not review.
@@ -355,12 +435,12 @@ def _describe_tool_config(tool_name, tool_entry):
         lines.append(f"  ERROR: config.json is not valid JSON: {e}")
         return "\n".join(lines)
 
-    for key in ('database_path', 'archive_root', 'mode'):
+    for key in ('database_path', 'archive_root', 'output_report_path', 'output_path', 'mode'):
         if key not in config:
             continue
         value = config[key]
         line = f"  {key}: {value!r}"
-        if key in ('database_path', 'archive_root'):
+        if key in ('database_path', 'archive_root', 'output_report_path', 'output_path'):
             resolved = Path(value)
             if not resolved.is_absolute():
                 resolved = PROJECT_ROOT / resolved
@@ -415,7 +495,8 @@ def _describe_database(db_path, label):
     return "\n".join(lines)
 
 
-def generate_diagnostic_report(source_field_value, archive_field_value, log_entries=None):
+def generate_diagnostic_report(source_field_value, archive_field_value, log_entries=None,
+                               test_folder_value=''):
     """
     Builds a plain-text diagnostic report: environment info, the current
     Source/Archive field values, every configured tool's script/config
@@ -445,6 +526,9 @@ def generate_diagnostic_report(source_field_value, archive_field_value, log_entr
     lines.append("")
 
     lines.append("-- Current GUI fields --")
+    lines.append(f"Test folder: {test_folder_value or '(empty)'}")
+    if test_folder_value:
+        lines.append(f"  exists: {Path(test_folder_value).exists()}")
     lines.append(f"Source folder: {source_field_value or '(empty)'}")
     if source_field_value:
         lines.append(f"  exists: {Path(source_field_value).exists()}")

@@ -47,7 +47,8 @@ from gui_data import (
     load_gui_config, update_archive_root_in_config, check_looks_like_archive,
     check_folder_writable, check_archive_destination, load_settings, save_settings,
     check_and_log_startup, log_clean_shutdown, append_log_entry, get_log_entries,
-    generate_diagnostic_report, PROJECT_ROOT, GUI_SETTINGS_PATH
+    generate_diagnostic_report, configure_test_folder, get_test_folder_paths,
+    PROJECT_ROOT, GUI_SETTINGS_PATH
 )
 
 
@@ -82,6 +83,18 @@ class ChronoVaultWindow(QMainWindow):
         left_widget = QWidget()
         layout = QVBoxLayout(left_widget)
         layout.setContentsMargins(0, 0, 0, 0)
+
+        # --- Test workspace row ---
+        test_folder_row = QHBoxLayout()
+        test_folder_row.addWidget(QLabel("Test folder:"))
+        self.test_folder_field = QLineEdit()
+        self.test_folder_field.setPlaceholderText("Root folder containing this test run's data, archive, and reports")
+        self.test_folder_field.editingFinished.connect(self._apply_test_folder_from_field)
+        test_folder_row.addWidget(self.test_folder_field)
+        test_folder_browse = QPushButton("Browse…")
+        test_folder_browse.clicked.connect(self._browse_test_folder)
+        test_folder_row.addWidget(test_folder_browse)
+        layout.addLayout(test_folder_row)
 
         # --- Source folder row ---
         source_row = QHBoxLayout()
@@ -207,10 +220,12 @@ class ChronoVaultWindow(QMainWindow):
 
     def _restore_settings(self):
         """Pre-fill fields from the last session, if gui_settings.ini exists. Purely a convenience -- never required."""
+        self.test_folder_field.setText(self.settings['paths'].get('test_folder', ''))
         self.source_field.setText(self.settings['paths'].get('source_folder', ''))
         self.archive_field.setText(self.settings['paths'].get('archive_folder', ''))
 
     def _save_settings(self):
+        self.settings['paths']['test_folder'] = self.test_folder_field.text()
         self.settings['paths']['source_folder'] = self.source_field.text()
         self.settings['paths']['archive_folder'] = self.archive_field.text()
         save_settings(self.settings)
@@ -226,6 +241,47 @@ class ChronoVaultWindow(QMainWindow):
         """
         append_log_entry(self.settings, description)
         save_settings(self.settings)
+
+    def _browse_test_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select test folder")
+        if folder:
+            self._apply_test_folder(folder)
+
+    def _apply_test_folder_from_field(self):
+        folder = self.test_folder_field.text().strip()
+        if folder:
+            self._apply_test_folder(folder)
+
+    def _apply_test_folder(self, folder):
+        """
+        Reset every dependent GUI/config path to one compartmentalized
+        workspace. This creates missing subfolders but never clears or
+        deletes existing workspace contents.
+        """
+        root = Path(folder).expanduser()
+        if not root.exists() or not root.is_dir():
+            QMessageBox.warning(self, "Folder not found",
+                                f"This test folder doesn't exist:\n{root}")
+            return
+
+        writable, error = check_folder_writable(root)
+        if not writable:
+            QMessageBox.warning(self, "Folder not writable",
+                                f"Could not write to this folder:\n{root}\n\n{error}")
+            return
+
+        try:
+            paths = configure_test_folder(self.gui_config, root)
+        except (OSError, json.JSONDecodeError, KeyError) as e:
+            QMessageBox.critical(self, "Test folder setup failed",
+                                 f"Could not configure the test workspace:\n\n{e}")
+            return
+
+        self.test_folder_field.setText(paths['test_folder'])
+        self.source_field.setText(paths['source_folder'])
+        self.archive_field.setText(paths['archive_folder'])
+        self._save_settings()
+        self._log(f"Test folder set and dependent paths reset: {paths['test_folder']}")
 
     def _browse_source(self):
         folder = QFileDialog.getExistingDirectory(self, "Select source folder to search")
@@ -542,49 +598,27 @@ class ChronoVaultWindow(QMainWindow):
 
     def _run_generate_test_data(self):
         """
-        Unlike every other button here, this doesn't use the Source or
-        Archive fields at all -- it prompts for its own destination via
-        a dedicated folder dialog, since generating test data is a
-        one-off setup action unrelated to whatever the main pipeline
-        fields currently point at.
-
-        Writes into a 'test_data' SUBFOLDER of whatever's picked, not
-        directly into the picked folder itself -- generate_test_data.py
-        scatters a dozen top-level folders (DCIM/, Old_Backup_1/,
-        Archives/, etc.) into its output directory, and dumping those
-        straight into an arbitrary chosen folder would mix them in with
-        whatever's already there. A dedicated subfolder keeps the
-        generated content self-contained and obviously identifiable.
-
-        Checks write permission before launching by actually attempting
-        a real write (via check_folder_writable), rather than trusting
-        os.access() -- confirmed directly to be an unreliable predictor
-        here: it reports a folder as writable whenever the GUI happens
-        to run as root, regardless of actual permission bits, and is
-        also known to misreport on FAT32/exFAT removable drives (this
-        project's primary real-world case) and NAS/NFS/SMB shares,
-        where reported permission bits don't always reflect what's
-        actually enforced. Actually attempting the operation sidesteps
-        all of that by testing reality directly.
+        Generate fixtures directly inside the active workspace's
+        test_data folder. Existing data is not cleared first.
         """
         if 'generate_test_data' not in self.gui_config.get('tools', {}):
             QMessageBox.critical(self, "Not configured", "No 'generate_test_data' entry found in gui_config.json.")
             return
 
-        parent_folder = QFileDialog.getExistingDirectory(
-            self, "Select a folder -- a 'test_data' subfolder will be created inside it"
-        )
-        if not parent_folder:
-            return  # cancelled
+        test_folder = self.test_folder_field.text().strip()
+        if not test_folder:
+            QMessageBox.warning(self, "Missing test folder", "Choose a Test folder first.")
+            return
 
-        writable, error = check_folder_writable(parent_folder)
+        paths = get_test_folder_paths(test_folder)
+        writable, error = check_folder_writable(paths['test_folder'])
         if not writable:
             QMessageBox.warning(self, "Folder not writable",
-                                 f"Could not write to this folder:\n{parent_folder}\n\n{error}\n\n"
+                                 f"Could not write to this folder:\n{paths['test_folder']}\n\n{error}\n\n"
                                  f"Choose a different folder.")
             return
 
-        output_dir = str(Path(parent_folder) / "test_data")
+        output_dir = paths['source_folder']
         self._log(f"Generate Test Data: destination set to {output_dir}")
 
         tool = self.gui_config['tools']['generate_test_data']
@@ -616,7 +650,8 @@ class ChronoVaultWindow(QMainWindow):
             report = generate_diagnostic_report(
                 self.source_field.text().strip(),
                 self.archive_field.text().strip(),
-                log_entries=get_log_entries(self.settings)
+                log_entries=get_log_entries(self.settings),
+                test_folder_value=self.test_folder_field.text().strip()
             )
         except Exception as e:
             self._log(f"Diagnostic Report generation FAILED: {e}")
@@ -628,8 +663,13 @@ class ChronoVaultWindow(QMainWindow):
         self._log("Diagnostic Report generated")
         self.output_panel.appendPlainText("\n" + report)
 
-        report_path = PROJECT_ROOT / "gui" / "diagnostic_report.txt"
+        test_folder = self.test_folder_field.text().strip()
+        if test_folder:
+            report_path = Path(get_test_folder_paths(test_folder)['diagnostic_report_path'])
+        else:
+            report_path = PROJECT_ROOT / "gui" / "diagnostic_report.txt"
         try:
+            report_path.parent.mkdir(parents=True, exist_ok=True)
             with open(report_path, 'w') as f:
                 f.write(report)
             self.output_panel.appendPlainText(f"\n(Also saved to {report_path})")

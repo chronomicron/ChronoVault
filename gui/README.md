@@ -45,7 +45,7 @@ sudo apt install libxcb-cursor0
 
 ## Layout
 
-- **Left side** — the main pipeline: Source folder + Browse, Archive folder + Browse, **Index** and **Import** buttons, a status line, and a live-streaming read-only output panel.
+- **Left side** — the main pipeline: Test folder, Source folder, and Archive folder selectors; **Index** and **Import** buttons; a status line; and a live-streaming read-only output panel.
 - **Right side** — a narrow panel, grouped by how often you'd actually use each thing, not just logical category:
   - **Tools** — Classify Media, Condition Database, Audit Archive, Duplicate Finder (all touch `located_files.db` and/or the archive) — normal day-to-day pipeline use
   - *(separator)*
@@ -55,6 +55,29 @@ sudo apt install libxcb-cursor0
   - **Generate Report**, pinned to the very bottom via a stretch — only needed when something's gone wrong
 
 All nine subprocess-launching buttons (everything except Generate Report) disable together while any one is running — not a minor UI nicety, this is what prevents two tools ever writing to the same database at once. Generate Report is the one deliberate exception: it runs synchronously in plain Python, never touches the shared subprocess slot, and is meant to work even while another tool is mid-run.
+
+## Test Workspace and Path Synchronization
+
+Choose **Test folder** first to establish one self-contained workspace:
+
+```text
+<test_folder>/
+├── indexer/
+│   └── located_files.db
+├── test_data/
+├── archive/
+│   └── archive_database.db
+└── reports/
+    ├── classification_report.json
+    ├── condition_report.json
+    ├── audit_result.json
+    ├── duplicate_report.json
+    └── diagnostic_report.txt
+```
+
+Selecting or reselecting the Test folder creates any missing subfolders, resets the Source field to `test_data/` and the Archive field to `archive/`, and rewrites the dependent path keys in each tool's existing JSON config. Indexer, Classify Media, Condition Database, Importer, and Duplicate Finder source mode all reference the single inventory database under `indexer/`; the persistent archive database remains separately owned by Importer under `archive/`. Existing files are never deleted or cleared.
+
+Source and Archive remain editable afterward. Manual edits affect the relevant launch behavior, while selecting another Test folder deliberately discards those field overrides and rebuilds all dependent configuration paths from the newly selected root. Non-path tool options are preserved.
 
 ## How the Archive Path Reaches Each Tool
 
@@ -100,7 +123,7 @@ Lists everything currently sitting in the review bucket (`date_uncertain = 1`), 
 
 ## Generate Test Data
 
-The one button that doesn't use the Source/Archive fields at all — clicking it opens its own folder picker, since generating test data is a one-off setup action unrelated to whatever the main pipeline is currently pointed at. Writes into a `test_data` **subfolder** of whatever you pick, not directly into the picked folder itself — `generate_test_data.py` scatters a dozen top-level folders (`DCIM/`, `Old_Backup_1/`, `Archives/`, etc.) into its output directory, and dumping those straight into an arbitrary chosen folder would mix them in with whatever's already there.
+Requires a selected Test folder and writes directly into that workspace's `test_data/` subfolder, which is also placed in the Source field. It no longer opens a second destination picker. The generator does not clear existing data first, so reusing a workspace preserves stale or unrelated files already under `test_data/`.
 
 **Write-permission check, and a real fix along the way:** before launching, the GUI actually attempts a real write (a temp marker created then removed) rather than trusting `os.access()`. This isn't caution for its own sake — testing directly confirmed `os.access()` is unreliable in exactly the situations this project cares about most: it reports a folder as writable whenever the GUI happens to be run as root, regardless of actual permission bits (root bypasses Unix permissions entirely — confirmed by an actual write succeeding against a `chmod 444` directory), and it's also known to misreport on FAT32/exFAT removable drives — this project's primary real-world case — and NAS/NFS/SMB shares, where reported permission bits don't always reflect what's actually enforced server-side. Actually attempting the operation sidesteps all of that.
 
@@ -109,36 +132,36 @@ The one button that doesn't use the Source/Archive fields at all — clicking it
 Bottom-right button. Produces a plain-text report — meant to be pasted directly when asking for help — combining:
 
 - Environment info (Python/Qt/platform versions)
-- Current Source/Archive field values, and whether those paths currently exist
+- Current Test/Source/Archive field values, and whether those paths currently exist
 - The last 50 recorded events, in correct chronological order (sorted by each entry's own timestamp, not slot number, since slot order stops matching chronological order the moment the buffer wraps around even once)
 - Every configured tool's script/config existence, and the actual current values of `database_path`/`archive_root`/`mode` in each `config.json` — including whether those resolved paths exist on disk
 - Row counts from `located_files.db` (by status) and `archive_database.db`, if they exist
 
-Shown inline in the output panel and saved to `gui/diagnostic_report.txt`. It never mutates pipeline databases or media, and it is not blocked by another tool running. It does write the report file and a success/failure entry in `gui_settings.ini`. Database inspection uses SQLite read-only mode and handles a locked database gracefully.
+Shown inline in the output panel and saved to `<test_folder>/reports/diagnostic_report.txt` when a Test folder is set; without one, the legacy `gui/diagnostic_report.txt` location remains as a fallback. It never mutates pipeline databases or media, and it is not blocked by another tool running. It does write the report file and a success/failure entry in `gui_settings.ini`. Database inspection uses SQLite read-only mode and handles a locked database gracefully.
 
 ## The Two Config Files, and Why They're Split
 
-**`gui_config.json`** — static, developer-facing, checked into git. It maps each button to a script and, where applicable, a tool config, using paths relative to the project root. The GUI does not synchronize the separate tools' `database_path` values; those configs must already point at the intended shared `located_files.db`.
+**`gui_config.json`** — static, developer-facing, checked into git. It maps each button to a script and, where applicable, a tool config, using paths relative to the project root. Selecting a Test folder uses this map to synchronize each dependent tool's database, archive, and report path keys while preserving unrelated options.
 
-**`gui_settings.ini`** — dynamic, personal, **not** checked into git. Last-used Source/Archive paths, plus the rolling activity log described above. Safe to delete if it ever gets confused — the GUI just starts fresh with blank fields and an empty log.
+**`gui_settings.ini`** — dynamic, personal, **not** checked into git. Last-used Test/Source/Archive paths, plus the rolling activity log described above. Safe to delete if it ever gets confused — the GUI just starts fresh with blank fields and an empty log.
 
 ## Files in This Folder
 
 | File | Purpose |
 |---|---|
 | `chronovault_gui.py` | The window and all Qt-related code. |
-| `gui_data.py` | Non-Qt logic — config loading, `archive_root` syncing, the activity log, diagnostic report generation — deliberately separated so it's fully testable without Qt installed at all. |
+| `gui_data.py` | Non-Qt logic — workspace/config path synchronization, the activity log, and diagnostic report generation — deliberately separated so it's fully testable without Qt installed at all. |
 | `gui_config.json` | Static tool-location config (checked into git). |
 | `gui_settings.ini` | Personal paths + activity log (not checked into git, created automatically). |
-| `diagnostic_report.txt` | Generated on demand by the Diagnostic Report button; not checked into git. |
+| `diagnostic_report.txt` | Legacy fallback output when no Test folder is set; workspace reports go under `<test_folder>/reports/`. |
 
 ## Known Limitations (v0.1, Honestly Listed)
 
 - No Stop button yet. Closing the window while a tool is running does not provide a controlled cancellation workflow, even though Indexer now commits stored file rows in batches.
 - Indexer has no periodic scan heartbeat yet; output can remain quiet during a long filesystem walk. Other tools stream whatever progress they print.
 - No formal Verify Status dialog yet — Generate Report covers much of the same need for now, but doesn't give a simple pass/fail checklist view.
-- Source-folder selection is used only for the Indexer invocation. Classify Media and Condition Database use the `database_path` already stored in their own configs; selecting a Source folder does not rewrite those paths.
-- Generate Test Data always targets `<chosen folder>/test_data`, but the generator does not clear an existing directory first; stale files can remain.
+- The Source field controls Indexer's scan root only. The shared inventory database is reset from the Test folder, not from later manual Source edits.
+- Generate Test Data targets `<test_folder>/test_data`, but the generator does not clear an existing directory first; stale files can remain.
 - The write check uses a fixed `.chronovault_write_test` directory name. If an empty directory with that name already exists, the check removes it; if a non-empty one exists, the check reports the destination as unwritable.
 - Condition Database has no archive-syncing need (it doesn't touch `archive_root` at all), so it is unaffected by archive-field synchronization.
 - Styling is default Qt (Fusion/native) — a deliberate choice to get the mechanics right first; a visual polish pass is planned for later, not forgotten.
