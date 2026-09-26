@@ -1,122 +1,138 @@
 # ChronoVault
 
-Hey! Are you like me — with pictures and media scattered everywhere? Some on a DVD, some on an old HDD, some on a USB key, others on a NAS, and even more buried in Google Drive or Dropbox? ChronoVault is here for you.
+ChronoVault is a local-first Python toolset for finding media scattered across drives and mounted storage, evaluating its likely relevance and date, and copying it into a chronological archive. It favors explainable evidence, visible uncertainty, and small tools that can be run independently.
 
-ChronoVault searches through all of your storage locations, finds your media, and consolidates it into a single, organized, chronological archive. It also helps you review and correct anything it wasn't confident about, using whatever evidence is available — camera metadata, GPS, editing software history, and, when nothing else exists, an OCR scan of a printed date stamp.
+The project is currently most capable with still images. Its core indexing, image classification, date analysis, conditioning, import, review, audit, duplicate-reporting, test-data, and GUI-launcher workflows exist; broader media analysis and stronger recovery, repair, and test infrastructure remain under development.
 
-## The Problem
+## Why ChronoVault exists
 
-Photos and videos pile up across years of phones, cameras, cloud backups, and forgotten external drives. There's rarely one single place where everything lives, and duplicates, dumped phone exports, and messy folder structures make it worse over time. ChronoVault exists to pull all of that together into one clean, dated archive — without you having to sort through everything by hand.
+Personal media tends to accumulate across old hard drives, removable media, NAS shares, cloud-synchronized folders, camera exports, and backups. Names and folder structures are inconsistent, metadata is sometimes missing or misleading, and copying everything blindly can preserve large amounts of noise and duplication.
 
-## How It Works
+ChronoVault builds a traceable working inventory, records why a file appears relevant and when it was probably created, and copies eligible files into an archive organized by date. When the available evidence is weak, it places the copy in `_review_needed/` instead of silently guessing.
 
-ChronoVault is built as a set of small, focused, modular tools rather than one big application. Each tool does one job well, can be run on its own from the terminal, and can also be launched from a simple menu (`chronovault.sh`).
+## Design principles
 
-The current pipeline:
+- **Local-first.** Media and SQLite records stay on storage you control; the current pipeline does not require a hosted service.
+- **Non-destructive toward sources.** The normal workflow reads original media and copies it into the archive. It does not delete or move source files.
+- **Explicit writes.** ChronoVault is not wholly read-only: tools create and update databases, reports, cached hashes, configuration state, archive copies, and—when a person applies a correction—archive paths.
+- **Explainable decisions.** Date results include their source, confidence, and reasoning. Classification likewise records its score, category, and evidence.
+- **Visible uncertainty.** Low-confidence dates are routed to review rather than treated as facts.
+- **Small, composable tools.** The command-line modules own the behavior. The Qt GUI launches and coordinates them rather than reimplementing the pipeline.
 
-1. **Indexer** — Recursively scans a starting folder for matching file types and logs everything into a database. Non-destructive, purely additive, safe to run against multiple locations.
+## Workflow
 
-2. **Classify Media** — Conservatively weeds out only clear web/graphic assets before they are hashed. Personal camera photos, scans, and ambiguous images remain eligible; the classification result and its evidence stay in the inventory database.
-
-3. **Condition Database** — Hashes eligible files, determines dates, and marks identical source copies before import.
-
-4. **Importer** — Copies matching files into the archive, organized as `archive/YYYY/MM/DD/`, using the precomputed date evidence. Files it isn't confident about go to `archive/_review_needed/` instead of a guessed folder.
-
-5. **Audit Archive** — Read-only reconciliation: compares the archive folder on disk against the database, reporting anything undocumented, missing, or misplaced. Never modifies anything.
-
-6. **Duplicate Finder** — Hashes files and groups identical content together, so you can see true duplicates and how much space could be reclaimed.
-
-5. **`retrieve_data` / `write_data`** — The review workflow for anything sitting in `_review_needed/`. `retrieve_data` is a UI-agnostic, read-only data layer (usable from a terminal script, a future desktop app, or a future web app — nothing about it assumes which); `write_data` applies a person's corrected date, physically moving the file and updating the database, while deliberately preserving the *original* algorithmic evidence rather than overwriting it.
-
-Each tool can be run independently from the terminal, or through the `chronovault.sh` menu.
-
-### Smarter Dates
-
-Figuring out when a photo was actually taken isn't always straightforward. `analyze_date` handles this as its own subsystem: given whatever evidence is available for a file, it returns a chosen date, a **confidence score (0–100)**, and a short explanation of its reasoning.
-
-Evidence comes from multiple independent sources, each with its own trustworthiness, combined rather than just picked from:
-
-| Source | Roughly | Notes |
-|---|:---:|---|
-| EXIF GPS timestamp | 98 | From the satellite signal, immune to a wrong camera clock |
-| EXIF DateTimeOriginal | 95 | |
-| TIFF's native DateTime tag | 90 | |
-| XMP CreateDate (Photoshop, Lightroom) | 80 | |
-| OCR corner date-stamp scan | 60 | **Opt-in only** — slow, and only useful when nothing else exists |
-| Filesystem date | 30 | Fallback of last resort |
-
-Multiple sources agreeing pushes confidence up; disagreement pulls it down. Files ChronoVault isn't confident about are routed to `archive/_review_needed/` rather than guessed into a possibly-wrong folder.
-
-`analyze_date` is deliberately built so a file's *type* determines which evidence sources even get checked (JPEG-family files get EXIF/GPS/XMP; TIFF gets its own tag; a future MP3/MP4 signal would come from entirely different places) — see `analyze_date/README.md` for the full architecture. The eventual goal is genuinely media-independent archiving, not just photos.
-
-### Testing Without Real Photos
-
-`generate_test_data/generate_test_data.py` generates a realistic, messy folder tree of fast date-analysis JPEGs plus larger media-classification fixtures: camera originals, stripped exports, high-DPI TIFF scans, BMP/GIF/PNG/THM cases, web assets, and safely-handled corrupt files. It also includes deliberate duplicates and unreadable junk-video files — useful for trying out any tool, or testing a change, without risking real photos.
-
-## Project Status
-
-Core pipeline (Indexer, Importer, Audit Archive, Duplicate Finder) is functional and tested against real-world messy data. Date determination combines five independent evidence sources with a scored, explainable confidence system. The review-workflow data layer (`retrieve_data`/`write_data`) exists and is tested, designed to work equally from a terminal script or a future GUI. OCR corner-stamp detection exists as a real, working, opt-in feature — extensively tested against real downloaded photos, with honestly-documented real limitations (Japanese/kanji stamps and dot-matrix CCTV fonts are both still unsolved). Development continues in small, incremental, tested steps.
-
-## Roadmap / Future Work
-
-**Done:**
-- ~~Archive audit tool~~, ~~duplicate detection~~, ~~confidence-scored date determination~~, ~~review bucket for low-confidence files~~, ~~repeatable test data~~
-- ~~GPS timestamp signal~~ — independently verified via satellite time
-- ~~XMP metadata signal~~ — Photoshop/Lightroom CreateDate and ModifyDate
-- ~~TIFF format support~~ — native DateTime tag
-- ~~OCR corner-stamp detection~~ — opt-in, real-world tested, real limitations documented
-- ~~Review-workflow data layer~~ — `retrieve_data`/`write_data`, UI-agnostic by design
-- ~~`analyze_date` architecture split~~ — orchestration layer + `image_tools/` per-format extractors
-
-**Still ahead:**
-- **MP3/MP4 support** — `audio_tools/` and `video_tools/` exist as placeholder folders with a documented plan (ID3 tags, MP4 container metadata), genuinely unbuilt.
-- **`analyze_date` as a standalone terminal tool** — currently a pure library, called by Importer. A CLI wrapper (config-driven, threaded, folder- or database-input, report-file or database output) is designed but not built.
-- **Additional date-evidence sources** — filename parsing, `.THM`-style camera sidecar files beyond what's already supported.
-- **Cross-copy duplicate date resolution** — when Duplicate Finder finds identical files in different date folders, there's no way yet to tell ChronoVault which one is right. Planned as a GUI review step.
-- **"Apply fixes" tool for Audit Archive's report** — add undocumented files to the database, move misplaced files, clean up orphaned entries.
-- **Qt GUI** — to orchestrate everything without the terminal; `retrieve_data`/`write_data` were specifically designed to plug into this without rework.
-- **AI-assisted labeling** — following the same "evidence in, scored answer out" pattern as `analyze_date`.
-- **Search and retrieval** — once labeling exists.
-
-## Project Structure
-
-```
-ChronoVault/
-├── README.md
-├── Database_schema.md
-├── .gitignore
-├── chronovault.sh              (menu launcher / step-by-step test runner)
-├── indexer/
-├── importer/
-├── audit_archive/
-├── duplicate_finder/
-├── analyze_date/
-│   ├── analyze_date.py          (orchestration: dispatch, scoring, combination)
-│   ├── image_tools/              (EXIF, GPS, XMP, TIFF, OCR -- all real, tested)
-│   ├── audio_tools/              (placeholder -- planned, not built)
-│   └── video_tools/              (placeholder -- planned, not built)
-├── retrieve_data/                (read-only data layer for the review workflow)
-├── write_data/                   (applies corrections -- the mutating twin of retrieve_data)
-├── generate_test_data/
-├── test_functions/                (throwaway debugging/verification scripts)
-├── located_files.db              (created by Indexer -- not tracked in git)
-├── archive/                       (created by Importer -- not tracked in git)
-│   └── _review_needed/            (low-confidence files land here)
-└── test_data/                      (created by generate_test_data.py -- not tracked in git)
+```text
+Indexer → Classify Media → Condition Database → Importer → Audit Archive
 ```
 
-## Requirements
+1. **[Indexer](indexer/README.md)** recursively discovers configured media extensions and records them in the disposable source inventory, `located_files.db`. It also records ZIP, TAR, and ISO containers and can optionally list matching members without extracting them.
+2. **[Classify Media](classify_media/README.md)** conservatively scores indexed images as likely personal media or likely web/graphic material. Its default policy excludes only the strongest negative category.
+3. **[Condition Database](condition_database/README.md)** hashes eligible inventory rows, records date-analysis results for pre-import visibility, and marks byte-identical duplicates within the source inventory.
+4. **[Importer](importer/README.md)** applies its own filters, calls the shared date analyzer again, copies eligible files into `YYYY/MM/DD/` or `_review_needed/`, records them in the persistent archive database, and updates source statuses. It does not consume Condition Database's stored date result as a cache.
+5. **[Audit Archive](audit_archive/README.md)** compares the archive on disk with its database and reports undocumented, missing, and misplaced files. It does not repair or move them; its only database write is cached hashes for matched files.
 
-- Python 3
-- [Pillow](https://pypi.org/project/Pillow/) — reading/writing image metadata
-- For OCR corner-stamp detection specifically (optional feature): `tesseract-ocr` (system package), `pytesseract`, `opencv-python-headless`, `numpy` — run `python3 test_functions/test_env.py` to check what's installed and what's missing
+Supporting components:
 
-## Getting Started
+- **[Analyze Date](analyze_date/README.md)** is the shared evidence-gathering and scoring library used by Condition Database and Importer. Current signals cover JPEG-family metadata, TIFF dates, filenames, containing folders, filesystem timestamps, and opt-in image OCR. See [Date Signals](Date_signals.md) for the authoritative evidence catalog.
+- **[Duplicate Finder](duplicate_finder/README.md)** reports SHA-256 duplicate groups in the source inventory or the archive. It never deletes or selects a preferred copy.
+- **[Retrieve Data](retrieve_data/README.md)** provides read-only structured access to review rows. **[Write Data](write_data/README.md)** is the explicit mutating boundary for applying a person's date correction and moving the corresponding archive file.
+- **[GUI](gui/README.md)** is a PySide6 launcher that streams tool output, synchronizes supported archive paths, records recent activity, and produces diagnostic reports.
+- **[Generate Test Data](generate_test_data/README.md)** and **[test_functions](test_functions/README.md)** support disposable manual testing. They are not a formal automated test suite.
 
-Run `python3 test_functions/test_env.py` first to confirm your environment has everything installed. Then run `./chronovault.sh` from the project root for a step-by-step menu (cleanup, generate test data, index, classify media, condition, import, audit, find duplicates), or run any tool directly. See the README inside each tool's subfolder for exact usage.
+## Data and archive layout
 
-Want to try things out without using real photos? `chronovault.sh` option 2 generates a sample folder tree for you.
+ChronoVault deliberately keeps two SQLite databases:
 
-## Philosophy
+- `located_files.db` is a rebuildable source inventory enriched by classification, conditioning, and status updates.
+- `<archive_root>/archive_database.db` is the persistent record of files copied into the archive.
 
-ChronoVault is being built deliberately, in small steps: write a small piece, test it against real data, commit it, then move to the next piece. Shared code is only extracted into its own module when there's a real, proven reason to reuse it — not preemptively. When a module grows past the point where one file makes sense (as happened with `analyze_date`), it gets split, but only once that growth has actually happened, not in anticipation of it.
+A typical destination looks like:
+
+```text
+archive/
+├── archive_database.db
+├── 2024/03/15/photo.jpg
+└── _review_needed/uncertain-photo.jpg
+```
+
+The databases are related by convention rather than foreign keys, and schema additions are currently performed by the tools that need them. See [Database Schema](Database_schema.md) for the complete schema, field ownership, statuses, and migration behavior.
+
+## Getting started
+
+ChronoVault is currently a developer-oriented repository rather than an installed Python package. There is no `requirements.txt`, `pyproject.toml`, installer, or container definition. Run commands from the repository root because many configured paths are resolved from the process working directory.
+
+### Requirements
+
+- Python 3.8 or newer
+- Pillow for core image metadata and fixture generation
+- PySide6 only for the GUI
+- Tesseract, `pytesseract`, OpenCV, and NumPy only for opt-in OCR
+- `pycdlib` only for listing ISO contents
+
+For example, in a virtual environment:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install Pillow
+```
+
+Install optional dependencies only for the features you intend to use; consult the relevant module README for details.
+
+### Check the environment
+
+```bash
+python3 test_functions/test_env.py
+```
+
+This checks required and optional components and reports what is available. It is a diagnostic script, not a full test suite.
+
+### Explore safely with generated data
+
+```bash
+./chronovault.sh
+```
+
+The interactive test runner keeps its generated media, databases, archive, and reports under `chronovault_test/`. Its cleanup action deletes that disposable directory, so read the prompt and do not repurpose the directory for real media.
+
+The underlying pipeline can also be run directly after reviewing each tool's `config.json`:
+
+```bash
+python3 indexer/indexer.py indexer/config.json /path/to/source
+python3 classify_media/classify_media.py classify_media/config.json
+python3 condition_database/condition_database.py condition_database/config.json
+python3 importer/importer.py importer/config.json
+python3 audit_archive/audit_archive.py audit_archive/config.json
+```
+
+Treat configuration paths as operational state: they may point to real media or be changed by the GUI. Prefer a disposable source and destination until you understand the resulting databases and archive layout.
+
+### Use the GUI launcher
+
+After installing PySide6:
+
+```bash
+python3 chronovault.py
+```
+
+The GUI exposes the working tools and diagnostics, but it is not yet a media browser or full review interface. See its [README](gui/README.md) for path synchronization, safety checks, dependencies, and current limitations.
+
+## Current status and direction
+
+The core image-oriented workflow is usable and has been exercised with generated and real-world data, but ChronoVault should still be treated as an evolving personal project rather than a polished archival product. In particular, filesystem/database transitions are not fully transactional, automated test coverage is limited, and archive-wide pre-copy duplicate protection is not yet complete.
+
+Major planned areas include audio/video metadata extraction, richer image and sidecar support, candidate review, archive-member extraction, repair workflows, duplicate resolution, stronger schema/migration handling, automated tests, labeling, and search. These are future directions, not current features. See the [Roadmap](roadmap.md) for the maintained list of risks, priorities, and open design decisions.
+
+## Documentation
+
+- [Database Schema](Database_schema.md) — authoritative SQLite schema, ownership, statuses, and migration behavior.
+- [Date Signals](Date_signals.md) — implemented date evidence and scoring, limitations, and researched future sources.
+- [Roadmap](roadmap.md) — current gaps, risks, priorities, and future work.
+- [Agent Guide](AGENTS.md) — repository guidance for coding agents; it is scheduled for a separate audit.
+- Module READMEs — detailed usage, configuration, behavior, and limitations:
+  - [Indexer](indexer/README.md), [Classify Media](classify_media/README.md), [Condition Database](condition_database/README.md), [Importer](importer/README.md)
+  - [Audit Archive](audit_archive/README.md), [Duplicate Finder](duplicate_finder/README.md), [Retrieve Data](retrieve_data/README.md), [Write Data](write_data/README.md)
+  - [Analyze Date](analyze_date/README.md), including [image](analyze_date/image_tools/README.md), [multi-type](analyze_date/multi_tools/README.md), [audio placeholder](analyze_date/audio_tools/README.md), and [video placeholder](analyze_date/video_tools/README.md) documentation
+  - [GUI](gui/README.md), [Generate Test Data](generate_test_data/README.md), and [manual test utilities](test_functions/README.md)
+
+When documents disagree about current behavior, the implementation and the audited subsystem documentation take precedence. Planned behavior should remain clearly labeled until it exists.
