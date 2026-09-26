@@ -1,6 +1,6 @@
 # analyze_date
 
-`analyze_date` figures out the most likely date a media file was created, how confident it is in that date, and why. It's not a standalone tool you run from the terminal — it's a small package that other tools (currently Importer, plus the `test_functions/` debugging scripts) import and call.
+`analyze_date` figures out the most likely date a media file was created, how confident it is in that date, and why. It is not a standalone tool you run from the terminal. It is a small package used by Condition Database, Importer, and the focused scripts under `test_functions/`.
 
 ## Architecture
 
@@ -15,8 +15,11 @@ analyze_date/
 │   ├── xmp_tools.py        -- XMP CreateDate / ModifyDate (Photoshop, Lightroom, etc.)
 │   ├── tiff_tools.py       -- TIFF's own baseline DateTime tag
 │   └── ocr_tools.py        -- OCR corner-stamp scanning (opt-in, see below)
-├── audio_tools/            -- empty placeholders, future MP3/ID3 work
-└── video_tools/            -- empty placeholders, future MP4 container-metadata work
+├── multi_tools/
+│   ├── analyze_filename.py -- filename patterns, for every file type
+│   └── analyze_folder.py   -- containing-folder patterns, for every file type
+├── audio_tools/            -- placeholder for future MP3/ID3 work
+└── video_tools/            -- placeholder for future container-metadata work
 ```
 
 This split happened after the module had grown to cover five different evidence sources in one file — each one now lives in its own testable, independently-reusable module, and `analyze_date.py` only needs to know *that* a source exists and how much to trust it, not *how* it works.
@@ -46,6 +49,7 @@ Returns a dict:
     'date_taken': datetime or None,
     'date_source': 'exif_gps' | 'exif_original' | 'exif_digitized' | 'tiff_datetime'
                     | 'xmp_create_date' | 'xmp_modify_date' | 'ocr_corner_stamp'
+                    | 'filename_pattern' | 'path_folder_pattern'
                     | 'filesystem_fallback' | None,
     'filesystem_creation_date': datetime or None,
     'confidence': int,      # 0-100
@@ -62,7 +66,9 @@ Different file types carry date evidence in completely different places, so `gat
 |---|---|
 | `.jpg`, `.jpeg`, `.thm` | GPS, EXIF, XMP (+ OCR, if `try_ocr=True`) |
 | `.tif`, `.tiff` | TIFF's baseline DateTime tag (+ OCR, if `try_ocr=True`) |
-| anything else | filesystem date only, for now |
+| anything else | no format-specific signal yet |
+
+After format-specific dispatch, every file type is also checked for a date in its filename and containing folders, followed by the filesystem fallback.
 
 `file_type` is inferred from the file's own extension unless explicitly overridden in the evidence dict — pass this when a caller already knows the real type and it might not match the extension (e.g. a DNG file, which is genuinely TIFF-structured, passed as `file_type='.tiff'`).
 
@@ -75,7 +81,7 @@ Different file types carry date evidence in completely different places, so `gat
 Every date signal gathered for a file (from whichever `image_tools/` module found it) is treated as one entry in a list, not as a special case — the combination logic doesn't hardcode "check EXIF, then check GPS." It collects however many signals are available and combines them the same way regardless of how many there are:
 
 1. **Pick a primary signal.** The signal with the highest base confidence becomes the date actually used.
-2. **Check the others for agreement.** Any other signal within `mismatch_threshold_days` of the primary confirms it; anything further off disagrees.
+2. **Check the others for agreement.** The code compares `abs((other_date - primary_date).days)` with `mismatch_threshold_days`. Because `timedelta.days` is an integer floor rather than an exact duration, the default `1`-day setting can treat some differences approaching two days as agreement.
 3. **Adjust the score.** Confidence starts at the primary signal's base score, then gets a bonus for each agreeing signal and a penalty for each disagreeing one.
 4. **Cap implausible dates.** If the resulting date is before cameras existed, or in the future, confidence is capped very low no matter what the signals said.
 
@@ -90,7 +96,9 @@ Every date signal gathered for a file (from whichever `image_tools/` module foun
 | `tiff_datetime` | 90 | TIFF's own native timestamp field |
 | `exif_digitized` | 85 | |
 | `xmp_create_date` | 80 | `xmp:CreateDate` or `photoshop:DateCreated` |
+| `filename_pattern` | 70 | Camera/phone conventions and numeric dates in the filename |
 | `ocr_corner_stamp` | 60 | Already passed OCR's own internal confidence gate (see `ocr_tools.py`), but inherently less reliable than direct metadata |
+| `path_folder_pattern` | 40 | Year, year-month, or English/French month-and-year folder names |
 | `filesystem_fallback` | 30 | |
 | `xmp_modify_date` | 20 | Reflects a *later* edit, not original creation — a meaningfully weaker claim than CreateDate |
 
@@ -118,9 +126,18 @@ Confidence is always clamped to 0–100. Below **50**, `date_uncertain` is `True
 Nothing in `analyze_date()`'s actual combination logic needs to change — it already works for however many signals show up.
 
 **Realistic future sources**, not yet implemented:
-- **Filename-derived dates** — cameras/phones often bake the date into the filename (e.g. `IMG_20260720_123957.jpg`).
-- **Camera sidecar files** — some cameras write per-shot metadata files beyond `.THM`.
-- **ID3 tags (MP3)** and **container metadata (MP4)** — `audio_tools/` and `video_tools/` exist as empty placeholders for exactly this; genuinely new work, not a migration.
+- **Camera sidecar relationships** — `.thm` files themselves can be analyzed as JPEG-like files, but ChronoVault does not yet associate one as evidence for its corresponding video or RAW file.
+- **ID3 tags (MP3)** and **container metadata (MP4/QuickTime)** — `audio_tools/` and `video_tools/` contain placeholders only; neither is dispatched or scored.
+
+## Configuration
+
+`config.json` is a draft schema for a possible future standalone CLI. No current code reads it. Calling code supplies the evidence dictionary directly, so changing this JSON file has no effect on current analysis.
+
+## Dependencies and failure behavior
+
+- Pillow is required for image metadata extraction and for opening images for OCR.
+- OCR additionally requires Tesseract, `pytesseract`, OpenCV, and NumPy. The Python OCR dependencies are imported lazily, so normal non-OCR analysis does not require them.
+- The metadata extractors generally treat unreadable or absent metadata as "no signal." OCR is different: `find_date_in_corners()` can raise if the image cannot be opened or its optional dependencies/Tesseract are unavailable; callers opting into OCR should be prepared for that.
 
 ## Media Independence
 

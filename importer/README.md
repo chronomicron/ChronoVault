@@ -1,15 +1,15 @@
 # Importer
 
-Importer is the second step in the ChronoVault pipeline. It reads the inventory built by Indexer, copies matching files into a dated archive, and keeps a record of what it archived — including how confident it is about each file's date. It never touches or modifies the original source files — only reads and copies them.
+Importer is the copy stage after Indexer, Classify Media, and Condition Database. It reads the source inventory, copies eligible files into a dated archive, records each copy, and updates source-row statuses. It never modifies or deletes original media files.
 
 ## What It Does
 
-Importer connects to the database Indexer created (`located_files.db` by default) and looks for entries that are still eligible to be processed. For each eligible file, it:
+Importer connects to the database Indexer created (`located_files.db` by default) and selects rows whose status is `located` or `excluded` and whose extension is configured. Rows marked `duplicate` or `imported` are skipped. For each selected file, it:
 
 1. Checks the file against any configured filters (size limits, EXIF requirement, excluded paths, thumbnail exclusion). Files that fail a filter are marked `excluded` and skipped.
-2. Reads whatever EXIF and filesystem evidence is available, and hands it to `analyze_date` (see `analyze_date/README.md`), which returns a chosen date, a **confidence score (0–100)**, and a short explanation of its reasoning. Importer itself doesn't contain any date-determination logic — it just acts on the answer.
+2. Reads EXIF and calls `analyze_date` (see `analyze_date/README.md`) to recompute the chosen date, confidence, and explanation. Importer does **not** read the `date_taken`, `date_source`, `confidence`, or `date_reason` values previously stored by Condition Database.
 3. Copies the file into the archive:
-   - **Confident dates** (`confidence` above the uncertainty threshold) go into `archive/YYYY/MM/DD/filename.ext`, as before.
+   - **Confident dates** (`confidence >= 50` with the current analyzer threshold) go into `archive/YYYY/MM/DD/filename.ext`.
    - **Low-confidence dates** go into `archive/_review_needed/filename.ext` instead of a possibly-wrong date folder, so they're easy to find and sort out by hand later.
 4. Logs the copied file into a second database, `archive_database.db`, which lives inside the archive folder itself — including the chosen date, its source, the confidence score, and the reasoning string.
 5. Updates the original entry's status to `imported`.
@@ -21,9 +21,9 @@ Large files (20MB and up) are copied in chunks with a live progress readout, so 
 Importer is safe to run repeatedly:
 
 - Files already marked `imported` are considered done and are never re-processed or re-copied.
-- Files marked `excluded` **are re-evaluated on every run**. This matters because filters can change — if you loosen a filter (e.g. turn off `require_exif`), previously excluded files get a fresh chance to pass and be imported, without needing to re-run Indexer.
+- Every row marked `excluded` is re-evaluated on every run. The query does not distinguish Importer's own filter exclusions from `media_excluded = 1` rows excluded by Classify Media. A classifier-excluded row can therefore return to `located`/be imported if it passes Importer's independent filters.
 - If a source file no longer exists (deleted or moved since it was indexed), Importer reports it as missing and moves on without failing the whole run.
-- If Importer is interrupted partway through (Ctrl+C, crash, closed terminal), just re-run it — already-imported files are skipped automatically.
+- If Importer is interrupted, rows already marked `imported` are skipped on the next run. This is not fully transactional across filesystem and database operations; see the failure notes below.
 
 ## Usage
 
@@ -106,7 +106,7 @@ Created automatically inside `archive_root` the first time Importer runs. This i
 | Column         | Type    | Description                                                              |
 |-----------------|---------|------------------------------------------------------------------------------|
 | `date_taken`     | TEXT    | The date `analyze_date` chose.                                              |
-| `date_source`    | TEXT    | Where it came from: `exif_original`, `exif_digitized`, or `filesystem_fallback`. |
+| `date_source`    | TEXT    | Analyzer source such as `exif_gps`, EXIF/TIFF/XMP, filename, folder path, or filesystem fallback. Importer does not enable OCR. |
 | `confidence`     | INTEGER | `analyze_date`'s confidence score, 0–100.                                    |
 | `date_reason`    | TEXT    | Short explanation, e.g. `"EXIF (DateTimeOriginal) -- confirmed by filesystem creation date"`. |
 | `date_uncertain` | INTEGER | `1` if this file was routed to the review folder instead of a date folder.   |
@@ -114,6 +114,15 @@ Created automatically inside `archive_root` the first time Importer runs. This i
 `confidence` and `date_reason` are added automatically via `ALTER TABLE` the first time Importer runs against an older archive database that predates them — no manual migration needed.
 
 Camera metadata (`camera_make`, `camera_model`, `gps_latitude`, `gps_longitude`, `aperture`, `iso_speed`, `focal_length_mm`) is also recorded when present in EXIF, regardless of which folder the file ends up in.
+
+## Processing and Failure Notes
+
+- Importer stats the source file at run time; it does not trust the indexed size. Path exclusion substrings are case-sensitive. `require_exif` means Pillow returned any EXIF dictionary, not specifically a capture-date tag.
+- For each successful copy, the source row is changed to `imported` **before** the archive row is inserted. A crash or database error between those operations can leave a copied file and imported source status without a corresponding archive record.
+- Archive insertion uses `INSERT OR IGNORE`, while filename collision handling checks the filesystem only. If a database row refers to a currently missing destination path, Importer can copy a new file to that path and silently retain the old database row instead of recording the new source.
+- A failed chunked copy can leave a partial destination file. A retry then treats that name as occupied and chooses a numbered filename.
+- Importer does not compare content hashes with the existing archive. Re-indexing identical bytes from a different source path can create another archived copy unless Condition Database marks it duplicate within the current source inventory.
+- There is no Importer JSON report; outcomes are printed and persisted through the two databases.
 
 ## Requirements
 

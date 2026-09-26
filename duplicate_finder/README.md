@@ -1,12 +1,12 @@
 # Duplicate Finder
 
-Duplicate Finder hashes files with SHA-256 and groups anything with identical content together, so you can see exactly which files are true duplicates (not just same name or same size) and how much space could be reclaimed by removing the extras. Like Audit Archive, it's **read-only** — it reports duplicates, it never deletes or merges anything itself.
+Duplicate Finder hashes files with SHA-256 and groups identical content so you can see true duplicates (not merely matching names or sizes) and estimated reclaimable space. It never deletes, moves, or merges media. It is not strictly database-read-only: both modes may add a `file_hash` column and cache hashes, and the tool writes its JSON report.
 
 ## Two Modes
 
 Set via `"mode"` in the config — `"source"` or `"archive"`.
 
-**`source` mode** — checks `located_files.db`, the pre-import inventory Indexer built. This was the original use case: run it *before* Importer, to catch and think about duplicates before they ever get copied into the archive. By default it only checks rows with status `located` (configurable via `statuses_to_check`).
+**`source` mode** — checks `located_files.db`, the pre-import inventory Indexer built. By default it includes only rows with status `located` (configurable via `statuses_to_check`). Condition Database now performs the pipeline's automatic pre-import duplicate marking; this mode remains useful for a readout over selected source statuses.
 
 **`archive` mode** — checks the archive folder itself, on disk. This was added after discovering that source-mode alone can't catch everything: files copied into the archive *by hand*, bypassing Indexer and Importer entirely, would never show up in `located_files.db` in the first place. Archive mode walks `archive/` directly, so nothing gets missed regardless of how it got there.
 
@@ -16,7 +16,7 @@ Both modes produce the same kind of report at the end — grouped by hash, sorte
 
 Hashing is the expensive part, so both modes try hard to avoid redoing it:
 
-- **`source` mode** caches hashes into `located_files.file_hash` (added via `ALTER TABLE` the first time it runs, same pattern used everywhere else in ChronoVault for schema upgrades). A file already hashed on a previous run is skipped — you'll see it counted under "Already hashed (cached)" rather than "Newly hashed."
+- **`source` mode** caches hashes into `located_files.file_hash` (added via `ALTER TABLE` on first use). A row with any existing hash is trusted and not re-read. Missing source files are counted and printed, but are omitted from grouping and from the JSON summary.
 - **`archive` mode** is a little more nuanced, because a file here can be in one of two states:
   - **Documented** (it has a row in `archive_database.db`) — uses the hash Audit Archive already cached, if one exists. If not (e.g. Duplicate Finder is run before Audit Archive ever has been), it computes and caches it itself, so either tool can be the one that ends up filling that column in.
   - **Undocumented** (on disk, but no database row — e.g. copied in by hand) — there's no row to cache a hash *into*, so these are hashed fresh on every single run. This is inherent to the situation, not a missed optimization: an undocumented file has nowhere to persist a cached value until it's actually added to the database.
@@ -40,17 +40,17 @@ python3 duplicate_finder/duplicate_finder.py duplicate_finder/config.json
 | Option              | Default              | Description                                                      |
 |----------------------|-----------------------|----------------------------------------------------------------------|
 | `mode`               | `"source"`             | `"source"` or `"archive"`.                                          |
-| `database_path`      | *(required)*           | Path to `located_files.db`.                                         |
-| `statuses_to_check`  | `["located"]`          | Which `located_files.status` values to include.                      |
-| `output_path`        | `duplicate_report.json`| Where to write the JSON report.                                     |
+| `database_path`      | *(required)*           | Path to an existing Indexer-created `located_files.db`. |
+| `statuses_to_check`  | `["located"]`          | Exact `located_files.status` values to include. |
+| `output_path`        | `duplicate_report.json`| Where to write the JSON report. Relative paths use the process working directory. |
 
 **config.json (`archive` mode):**
 
 | Option          | Default                  | Description                                  |
 |------------------|----------------------------|--------------------------------------------------|
 | `mode`           | `"source"`                  | Must be `"archive"`.                             |
-| `archive_root`   | *(required)*                | Path to the archive folder to scan.              |
-| `output_path`    | `duplicate_report.json`     | Where to write the JSON report.                  |
+| `archive_root`   | *(required)*                | Existing archive folder containing `archive_database.db`; all files below it except the database itself are scanned. |
+| `output_path`    | `duplicate_report.json`     | Where to write the JSON report. Relative paths use the process working directory. |
 
 ## Output
 
@@ -79,6 +79,13 @@ python3 duplicate_finder/duplicate_finder.py duplicate_finder/config.json
 
 `summary` includes a few extra fields depending on mode — `source` mode has none beyond the common ones; `archive` mode adds `documented_cached`, `documented_newly_hashed`, and `undocumented_hashed`, mirroring the three-way breakdown printed to the terminal.
 
-## Known Limitation
+## Operational Notes and Known Limitations
+
+- Cached hashes have no file-size, modification-time, or other invalidation check. If a file changes in place after its hash is cached, later runs continue trusting the stale hash until the database value is cleared manually. This affects both source rows and documented archive files.
+- Archive mode only considers files currently on disk. Database rows whose files are missing are not reported; use Audit Archive for reconciliation.
+- Source mode requires the Indexer schema, and archive mode requires the Importer schema. Pointing SQLite at a nonexistent database path can create an empty file before the tool fails on the missing table.
+- Hash failures are printed and skipped rather than included as structured report entries.
+
+### Date-folder decision
 
 Duplicate Finder can tell you *that* two files are identical, but not *which folder is correct* if they're sitting in two different date folders (e.g. the same video imported twice, landing differently each time based on what date evidence was available at the time). Resolving that requires a person to look at both copies and decide — see Audit Archive's README for the fuller explanation of why this happens, and the root `README.md` roadmap for the planned GUI review step that will handle it.

@@ -27,7 +27,7 @@ Given a file id and a corrected date, this:
 3. Moves it into the normal `archive/YYYY/MM/DD/` folder that `corrected_date` implies, using the same collision-avoidance convention as Importer — a filename that's already taken gets ` (1)`, ` (2)`, etc. appended rather than silently overwritten.
 4. Updates the database: `archive_path` to the new location, `user_corrected_date` and `corrected_at` to record the correction, and `date_uncertain` flipped to `0`.
 
-Returns `{'success': bool, 'new_archive_path': str or None, 'error': str or None}` — every failure path returns a clean dict explaining why, rather than raising.
+Returns `{'success': bool, 'new_archive_path': str or None, 'error': str or None}` for missing IDs, guardrail rejection, missing media, and move failures. Setup, schema, path-creation, invalid-input, and database-update errors can still raise exceptions.
 
 ### What's Deliberately Left Untouched
 
@@ -37,7 +37,7 @@ The original algorithmic evidence — `date_taken`, `date_source`, `confidence`,
 
 `apply_date_correction()` will refuse to touch a file unless **either**:
 
-- it's currently marked uncertain (`date_uncertain = 1` — i.e. it's actually sitting in the review bucket), **or**
+- it is currently marked uncertain (`date_uncertain = 1`), **or**
 - it's already been manually corrected once before (`user_corrected_date` is set).
 
 A file the algorithm was already confident about — solid EXIF, filesystem date agreeing — is protected by default. The reasoning: when the computer's own date signals already agree with each other, they're more likely to be correct than an accidental or mistaken correction is to be deliberate. Files with no reliable evidence at all (no EXIF, nothing to cross-check) are exactly the case a manual correction exists for, since a person's own knowledge (a remembered birthday, an event) may be the *only* evidence available at all.
@@ -46,11 +46,18 @@ The second condition exists so this guardrail doesn't lock someone out of fixing
 
 ## Known Behavior and Limitations
 
-A few things worth knowing, found by actually testing this against real data rather than assumed:
+A few implementation details matter when using this mutating API:
 
 - **Only the latest correction is kept.** Correcting an already-corrected file overwrites `user_corrected_date`/`corrected_at` with the new values — there's no history of earlier corrections. Confirmed working (a file can be corrected, then corrected again, cleanly) but by design there's no audit trail of *how many* times or *what* the previous corrected value was.
 - **Empty folders aren't cleaned up.** Moving a file out of a date folder can leave that folder empty behind it. This is cosmetic only — Audit Archive and Duplicate Finder only ever look at files, not folder structure, so an empty leftover folder has no functional effect. Not yet addressed.
-- **Audit Archive needs to know about this.** A file corrected here will be flagged as "misplaced" by Audit Archive unless it's aware that `user_corrected_date` should take priority over `date_taken` when checking placement — which it now is (see `audit_archive/README.md`). If a future change to Audit Archive's placement logic is made without preserving that behavior, this is the interaction that would silently break.
+- **The flag is the guardrail, not the folder path.** The function does not verify that an uncertain file currently lives under `_review_needed/`; it uses the database row's `date_uncertain` value.
+- **Path resolution follows the process working directory.** A relative `archive_path` stored by Importer is wrapped in `Path(...)` directly. Calling this API from a different working directory can make an existing file appear missing.
+- **Move and database update are not atomic.** The file is moved first, then the row is updated and committed. If the SQL update/commit fails (including a unique-path conflict with a stale row), the file remains at the new location while the database retains the old path.
+- **Collision checks inspect disk only.** They do not check whether `archive_database.db` already contains the candidate path. Correcting a file again to the same date also sees its current filename as occupied and renames it with ` (1)`, even though it is the same file.
+- **Dates are not range-validated.** Any object providing `strftime()` and `isoformat()` can supply a year/month/day destination, including dates outside `analyze_date`'s plausibility range.
+- **Audit compatibility depends on precedence.** Audit Archive currently treats `user_corrected_date` as authoritative over preserved `date_taken`; changing that precedence would make valid corrections appear misplaced.
+
+The module has no CLI or config file. `archive_root` must contain an existing `archive_database.db`. `_ensure_correction_columns()` runs before row lookup, so even a request for a nonexistent ID can migrate the schema.
 
 ## Database Columns
 

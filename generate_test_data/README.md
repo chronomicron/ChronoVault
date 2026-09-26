@@ -1,8 +1,8 @@
 # generate_test_data
 
-`generate_test_data.py` builds a realistic, messy folder tree of small fake files for testing ChronoVault end-to-end — Indexer → Importer → Audit Archive → Duplicate Finder, and every signal source `analyze_date` currently supports — without needing real photos. Every file is tiny, so a full run copies fast, but each one is deliberately built to land in a specific confidence scenario.
+`generate_test_data.py` builds a realistic, messy fixture tree for exercising Indexer → Classify Media → Condition Database → Importer → Audit Archive → Duplicate Finder without using real personal media. The bulk date-analysis JPEGs are tiny and fast; the optional classification fixtures use larger, more realistic dimensions and include TIFF, BMP, GIF, PNG, THM, unusual, mislabeled, and corrupt inputs.
 
-**Documentation correction:** an earlier version of this README described TIFF, BMP, RAW-stub, and THM sidecar scenarios plus an `--other-format-samples` argument. None of that exists in the actual script — no such generation code or argument is present. This README now describes only what the code actually does. Whether those formats are still wanted as a future addition is an open question, not something silently dropped by this correction.
+The generator covers EXIF, GPS, XMP, filename, folder-name, and filesystem date behavior. It does not generate a native TIFF `DateTime` fixture or an OCR date-stamp fixture, so it does not cover every `analyze_date` signal. It also has no `--other-format-samples` option and creates no real camera RAW file.
 
 ## Usage
 
@@ -23,7 +23,7 @@ python3 generate_test_data/generate_test_data.py --seed 42
 | `--hidden-samples` | `5` | How many files placed in **each** dot-prefixed hidden folder (there are 2 such folders — see below). |
 | `--french-month-samples` | `3` | How many filename-only, no-EXIF files placed inside a French month-name folder (`Old_Backup_1/février 2022`). |
 | `--classification-samples` | `1` | How many copies of each media-classification fixture family to generate; `0` omits these fixtures. |
-| `--seed` | *(random)* | Pass a number for a reproducible run. |
+| `--seed` | *(random)* | Stabilizes pseudo-random choices. Timestamps are still based on the current time, so separate seeded runs are not byte-for-byte identical. |
 
 ## Scenarios Generated
 
@@ -31,22 +31,24 @@ python3 generate_test_data/generate_test_data.py --seed 42
 
 | Category | Roughly | Expected result |
 |---|:---:|---|
-| `match` | 30% | confidence ~100, normal `YYYY/MM/DD` folder |
-| `mismatch` | 38% | confidence ~70, still dated, flagged less certain |
-| `no_exif` | 25% | confidence 30 → `_review_needed/` |
-| `implausible` | 7% | confidence ~5 → `_review_needed/` |
+| `match` | 30% | EXIF near filesystem time; normally high confidence and a dated folder. |
+| `mismatch` | 38% | Past EXIF date disagrees with filesystem time; normally still dateable, but confidence can fall below 50 if another signal also disagrees. |
+| `no_exif` | 25% | Filesystem-only unless a randomly selected containing folder supplies a date; normally routed to `_review_needed/`. |
+| `implausible` | 7% | EXIF before the plausibility cutoff or in the future; chosen implausible dates are capped at confidence 5. |
+
+Because files are scattered randomly across `SUBFOLDERS`, some land under `Phone_Backup/2025` or `Phone_Backup/2026`. Those names are active `path_folder_pattern` signals and may add an agreement bonus or mismatch penalty. The confidence values below are therefore expected primaries/rough outcomes, not exact assertions for every generated file.
 
 **GPS and XMP scenarios** (`--metadata-samples` of each):
 
 | Category | Expected result |
 |---|---|
-| `gps_agree` | `source=exif_gps`, confidence ~100+ (GPS + EXIF confirm each other) |
+| `gps_agree` | `source=exif_gps`; GPS and EXIF confirm each other. |
 | `gps_disagree` | `source=exif_gps` still wins despite EXIF disagreeing (simulated bad camera clock) |
-| `gps_only` | `source=exif_gps`, no EXIF date present at all |
+| `gps_only` | `source=exif_gps`, with no EXIF capture date. |
 | `xmp_agree` | `source=exif_original`, confirmed by XMP CreateDate |
 | `xmp_disagree` | `source=exif_original` still wins despite XMP disagreeing (simulated later reprocessing) |
-| `xmp_only` | `source=xmp_create_date`, confidence ~80, no EXIF at all |
-| `xmp_modify_only` | `source=filesystem_fallback` (its base confidence, 30, outranks `xmp_modify_date`'s 20) — low confidence, → `_review_needed/` |
+| `xmp_only` | `source=xmp_create_date`, with no EXIF capture date. |
+| `xmp_modify_only` | Usually `source=filesystem_fallback`, which outranks `xmp_modify_date`; a dated containing folder can instead become primary. Normally routed to `_review_needed/`. |
 
 **Filename-date and hidden-folder scenarios** (fixed sample counts, not scaled by `--count`):
 
@@ -88,9 +90,11 @@ If a whole batch of `match`/`mismatch`/`gps_*`/`xmp_*` files ever comes back wit
 
 `analyze_date`'s filesystem-fallback signal reads a file's `ctime`, and on Linux there's no reliable way to backdate that — `os.utime()` only controls `mtime`/`atime`. Every file this script generates has a filesystem date of whenever the script actually ran, regardless of what EXIF/GPS/XMP date was written into it, or what date is embedded in an `euro_date` filename. This doesn't limit test coverage: since the embedded/filename dates are fully controllable, varying them against "now" already exercises every confidence scenario without needing to control the filesystem side at all.
 
-## Regenerating
+## Regenerating and Safety
 
-The output folder is meant to be thrown away and rebuilt on demand — not committed to git. When run via `chronovault.sh`, it's generated inside `chronovault_test/`, which is already gitignored as a whole folder.
+The output folder is meant to be disposable and not committed. The script creates the directory if needed and overwrites same-named generated files, but it does **not** clean the directory first; stale or unrelated files already there remain in place and can make observed totals exceed the printed total. Use a dedicated disposable directory and clean it separately when a truly fresh fixture set is required. When run through `chronovault.sh`, output belongs under the contained `chronovault_test/` tree.
+
+The script writes only beneath `--output-dir`. It requires Python 3 with Pillow; ZIP and TAR creation use the standard library.
 
 ## Known Gaps / Future Additions
 

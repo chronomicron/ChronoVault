@@ -4,12 +4,12 @@ Indexer is the first step in the ChronoVault pipeline. Its only job is to search
 
 ## What It Does
 
-Given a starting folder and a JSON configuration file, Indexer recursively walks the entire directory tree beneath that folder, checking every file it encounters against a list of file extensions defined in the config. Every matching file is logged into a SQLite database (`located_files.db` by default) along with some basic metadata: its path, extension, size, and creation/modification dates.
+Given a starting folder and a JSON configuration file, Indexer recursively walks the entire directory tree beneath that folder, checking every file it encounters against a list of file extensions defined in the config. Every matching file is logged into a SQLite database (`located_files.db` by default) along with its path, extension, size, and filesystem timestamps. Paths are stored exactly as produced from the supplied search path; passing a relative search path can therefore store relative file paths.
 
 Indexer is **accumulative and safe to run repeatedly**:
 
 - It can be run multiple times against different folders (an old HDD, a USB key, a NAS mount, a cloud-synced folder), and every run adds to the same database rather than replacing it.
-- If a file path is already in the database, Indexer skips it rather than adding a duplicate entry — so running it twice over the same folder won't create duplicate rows.
+- If a file path is already in the database, Indexer skips it rather than adding a duplicate row. It does not refresh that row's size, timestamps, status, classification, hash, or date fields if the file later changes in place.
 - Indexer never deletes, modifies, or touches the original files in any way. It only reads and logs.
 
 Each entry starts with a status of `located`. Later stages of the pipeline (like Importer) update that status as files move through the archive process.
@@ -25,7 +25,7 @@ Whether Indexer goes a step further and actually **looks inside** an archive —
 | `false` (default) | Archive locations are recorded. Nothing about their contents is known yet. |
 | `true` | Archive locations are recorded, **and** Indexer opens each one (ZIP via `zipfile`, TAR via `tarfile`, ISO via `pycdlib` if installed) just far enough to list which member files match your extensions — no extraction, no files written to disk from inside the archive. |
 
-**Turning this on later doesn't require a rescan.** If you first index a large or slow source location with `look_inside_archives` off, then decide afterward you do want to look inside the archives it found, just flip the flag and run Indexer again over the same path. Archives already on record (location only, contents never listed) get their contents listed *then* — this is a genuine backfill, not a re-scan of the whole drive. An archive whose contents were already successfully listed on a prior run is never re-opened on a later one, the same "don't redo work already done" principle used for hashing elsewhere in the project.
+**Turning this on later backfills existing rows, but still requires the normal source walk.** Flip the flag and run Indexer again over the same search path. The filesystem tree is walked again to rediscover the archive paths; when each previously recorded, not-yet-successfully-listed archive is encountered, its row is updated rather than inserted again. Successfully listed archives are not reopened. Archives in some other source tree are not backfilled unless that tree is scanned again.
 
 ### Why no extraction, no mounting
 
@@ -162,14 +162,17 @@ Indexer also creates a second table, `located_archives`, for detected compressed
 | `archive_type`          | TEXT    | `zip`, `tar`, `targz`, `iso`, or `unknown` (an extension in `archive_extensions` with no built-in lister). |
 | `archive_size`          | INTEGER | Archive file size in bytes. |
 | `contents_listed`       | INTEGER | `1` if contents were successfully listed at some point, `0` otherwise (never attempted, or attempted and failed — e.g. missing `pycdlib`, or a corrupt archive). Drives the backfill behavior described above. |
-| `matching_file_count`   | INTEGER | How many members inside matched `extensions`. `NULL` if never listed. |
-| `matching_files`        | TEXT    | JSON list of matching member names/paths inside the archive. Capped at 500 entries (see `note` if capped). `NULL` if never listed. |
+| `matching_file_count`   | INTEGER | Number of matching members retained by the listing loop. `NULL` if listing failed/was not attempted; capped at 500 rather than a true total for larger archives. |
+| `matching_files`        | TEXT    | JSON list of matching member names/paths, also capped at 500 (see `note`). `NULL` if listing failed or was not attempted. |
 | `note`                  | TEXT    | Explains a partial or failed listing — a missing dependency, a truncated list, or the underlying error from a corrupt archive. `NULL` when listing fully succeeded or was never attempted. |
 
 Both tables are created automatically the first time Indexer runs, if they don't already exist. See `Database_schema.md` at the project root for the complete cross-tool schema reference.
 
 ## Notes
 
-- Indexer only reads file system metadata (path, size, dates) for media files — it does not open or inspect their contents (no EXIF reading happens at this stage; that's handled later by Importer). Archives are the one exception: with `look_inside_archives` on, Indexer does open them, but only far enough to list member names — never to read or extract file contents.
-- If Indexer encounters a folder it doesn't have permission to read, it will report the error and exit rather than silently skipping it.
-- What happens to archive contents once they're listed — actually extracting matching files so they can be reviewed and imported — is a separate, not-yet-built step. See `roadmap.md`'s candidate-review mechanism notes.
+- Indexer only reads filesystem metadata for ordinary media files; no EXIF/content inspection occurs here. `creation_date` is derived from `st_ctime`, which is metadata-change time rather than birth/creation time on typical Linux filesystems. Archives are the exception: optional listing reads container/filesystem structures but never extracts members.
+- The walk collects paths in memory before database storage begins. An `OSError` during the walk is caught: files found before that error are then stored, and Indexer exits with status 1. A hard kill/crash during discovery can still lose the not-yet-stored discovery list. Media inserts commit every 100 attempted paths; archive rows commit one at a time.
+- Directory symlinks are not explicitly followed by the implementation's `Path.rglob()` walk.
+- Archive extensions take precedence if a filename matches both the media and archive extension sets; that path is recorded only in `located_archives`.
+- A failed archive listing is retried on a later listing-enabled run. However, rerunning with `look_inside_archives: false` updates an unsuccessfully listed row with `note = NULL`, clearing the earlier failure explanation. Summary counters also under-report an already-known, not-yet-listed archive when listing is disabled: it is neither `newly_recorded` nor `already_known`.
+- Extracting listed archive members for review/import is not built. See `roadmap.md`'s candidate-review notes.

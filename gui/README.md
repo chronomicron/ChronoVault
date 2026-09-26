@@ -47,14 +47,14 @@ sudo apt install libxcb-cursor0
 
 - **Left side** — the main pipeline: Source folder + Browse, Archive folder + Browse, **Index** and **Import** buttons, a status line, and a live-streaming read-only output panel.
 - **Right side** — a narrow panel, grouped by how often you'd actually use each thing, not just logical category:
-  - **Tools** — Condition Database, Audit Archive, Duplicate Finder (all touch `located_files.db` and/or the archive) — normal day-to-day pipeline use
+  - **Tools** — Classify Media, Condition Database, Audit Archive, Duplicate Finder (all touch `located_files.db` and/or the archive) — normal day-to-day pipeline use
   - *(separator)*
   - **Diagnostics** — Test Environment, Test Retrieve Data — occasional, read-only checks
   - *(separator)*
   - **Utilities** — Generate Test Data — one-off setup, not part of normal running
   - **Generate Report**, pinned to the very bottom via a stretch — only needed when something's gone wrong
 
-Eight of the nine right/left-side action buttons (everything except Generate Report) disable together while any one is running — not a minor UI nicety, this is what prevents two tools ever writing to the same database at once. Generate Report is the one deliberate exception: it runs synchronously in plain Python, never touches the shared subprocess slot, and is meant to work even while another tool is mid-run.
+All nine subprocess-launching buttons (everything except Generate Report) disable together while any one is running — not a minor UI nicety, this is what prevents two tools ever writing to the same database at once. Generate Report is the one deliberate exception: it runs synchronously in plain Python, never touches the shared subprocess slot, and is meant to work even while another tool is mid-run.
 
 ## How the Archive Path Reaches Each Tool
 
@@ -114,11 +114,11 @@ Bottom-right button. Produces a plain-text report — meant to be pasted directl
 - Every configured tool's script/config existence, and the actual current values of `database_path`/`archive_root`/`mode` in each `config.json` — including whether those resolved paths exist on disk
 - Row counts from `located_files.db` (by status) and `archive_database.db`, if they exist
 
-Shown inline in the output panel and saved to `gui/diagnostic_report.txt`. Entirely read-only — never modifies anything, and isn't blocked by another tool running (that's often exactly when you'd want to generate one). Reading the databases uses a read-only connection and catches "database is locked" gracefully, since it might run while another tool is mid-write.
+Shown inline in the output panel and saved to `gui/diagnostic_report.txt`. It never mutates pipeline databases or media, and it is not blocked by another tool running. It does write the report file and a success/failure entry in `gui_settings.ini`. Database inspection uses SQLite read-only mode and handles a locked database gracefully.
 
 ## The Two Config Files, and Why They're Split
 
-**`gui_config.json`** — static, developer-facing, checked into git. Where each tool's script and `config.json` live, as paths relative to the project root.
+**`gui_config.json`** — static, developer-facing, checked into git. It maps each button to a script and, where applicable, a tool config, using paths relative to the project root. The GUI does not synchronize the separate tools' `database_path` values; those configs must already point at the intended shared `located_files.db`.
 
 **`gui_settings.ini`** — dynamic, personal, **not** checked into git. Last-used Source/Archive paths, plus the rolling activity log described above. Safe to delete if it ever gets confused — the GUI just starts fresh with blank fields and an empty log.
 
@@ -134,8 +134,11 @@ Shown inline in the output panel and saved to `gui/diagnostic_report.txt`. Entir
 
 ## Known Limitations (v0.1, Honestly Listed)
 
-- No Stop button yet — closing the window while a tool is running doesn't cleanly terminate it.
-- No live per-file progress during a scan — Indexer's own progress-printing improvements (checkpointing every ~100 files) aren't built yet.
+- No Stop button yet. Closing the window while a tool is running does not provide a controlled cancellation workflow, even though Indexer now commits stored file rows in batches.
+- Indexer has no periodic scan heartbeat yet; output can remain quiet during a long filesystem walk. Other tools stream whatever progress they print.
 - No formal Verify Status dialog yet — Generate Report covers much of the same need for now, but doesn't give a simple pass/fail checklist view.
-- Condition Database has no archive-syncing need (it doesn't touch `archive_root` at all), so it's unaffected by anything described above.
+- Source-folder selection is used only for the Indexer invocation. Classify Media and Condition Database use the `database_path` already stored in their own configs; selecting a Source folder does not rewrite those paths.
+- Generate Test Data always targets `<chosen folder>/test_data`, but the generator does not clear an existing directory first; stale files can remain.
+- The write check uses a fixed `.chronovault_write_test` directory name. If an empty directory with that name already exists, the check removes it; if a non-empty one exists, the check reports the destination as unwritable.
+- Condition Database has no archive-syncing need (it doesn't touch `archive_root` at all), so it is unaffected by archive-field synchronization.
 - Styling is default Qt (Fusion/native) — a deliberate choice to get the mechanics right first; a visual polish pass is planned for later, not forgotten.

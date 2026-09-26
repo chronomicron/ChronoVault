@@ -8,12 +8,12 @@ Three kinds of discrepancy:
 
 1. **Undocumented** — a file exists on disk but has no matching row in `archive_database.db`. Usually means something was copied into the archive by hand, outside of Importer.
 2. **Missing** — a row exists in the database but the file it points to is no longer on disk. Usually means something was deleted or moved outside of ChronoVault.
-3. **Misplaced** — the file is in *both* places (a "matched" file), but it isn't sitting in the date folder its own recorded `date_taken` says it should be in.
+3. **Misplaced** — the file is in *both* places (a "matched" file), but its recognized `YYYY/MM/DD` folder differs from its effective recorded date.
 
 Misplacement is checked two different ways, because the information available differs:
 
-- **Matched files** — compared against their own `date_taken` value already stored in the database (the date Importer originally decided on).
-- **Undocumented files** — there's no stored date to compare against, so Audit Archive reads EXIF fresh (falling back to the filesystem date, same priority Importer uses) to work out where the file *should* be, then compares that to where it actually is. This is why an undocumented file can be flagged as misplaced too — it's a separate check from the matched-file one, with its own count in the report (`undocumented_misplaced_count`).
+- **Matched files** — compared against `user_corrected_date` when present; otherwise against the original `date_taken`. A manual correction is therefore authoritative without overwriting the original algorithmic evidence.
+- **Undocumented files** — there is no stored date to compare against, so Audit Archive uses its own limited heuristic: `DateTimeOriginal`, then `DateTimeDigitized`, then filesystem `st_ctime`. This does **not** call `analyze_date` and does not consider GPS, XMP, TIFF, filename, or folder signals. An undocumented file can be flagged as misplaced too, with its own count (`undocumented_misplaced_count`).
 
 ## Hashing
 
@@ -21,7 +21,7 @@ While Audit Archive is already walking every matched file, it also computes and 
 
 A few specifics worth knowing:
 
-- **Only matched files get cached.** Undocumented files have no database row to cache a hash *into*, so their hashes aren't stored here — Duplicate Finder hashes those itself, fresh, each time it runs.
+- **Only matched files in the current scan get cached.** Undocumented files have no database row to cache a hash *into*, so their hashes aren't stored here — Duplicate Finder hashes those itself, fresh, each time it runs. When an extension filter is active, only on-disk files admitted by that filter can be matched and hashed.
 - **Already-cached files are skipped.** If `file_hash` is already set for a row, Audit Archive won't recompute it — the "Newly hashed: X, already cached: Y" line in the output reflects this.
 - **Large files show live progress.** Same convention as Importer and Duplicate Finder: files ≥20MB are hashed in 4MB chunks with a `hashing: X / Y (Z%)` progress readout, so a multi-gigabyte video doesn't look frozen.
 - **The `file_hash` column is added automatically.** It didn't exist in the original `archive_files` schema — Audit Archive adds it via `ALTER TABLE` the first time it runs, so older archives are upgraded in place, not left broken.
@@ -36,11 +36,11 @@ Worth keeping on record, since both were subtle enough to slip past an initial i
 
 Both were caught by running Audit Archive against real, deliberately-messed-up test data (a renamed file plus several manual copies into other date folders) and checking the reported numbers against what was actually done to the files — not just by reading the code.
 
-## Known Limitation (By Design, For Now)
+## Known Limitations
 
-Misplacement checking only ever compares a file to *its own* recorded date — it has no concept of "this file is identical to another file sitting in a different folder, and they disagree." If the exact same photo or video ends up copied into two different date folders (say, once with solid EXIF landing correctly, and once via a path where only a weaker fallback date was available), Audit Archive will consider *both* placements individually "correct," since each one matches its own stored date.
-
-Catching that requires cross-referencing Duplicate Finder's output against Audit's — which is intentionally deferred to the planned GUI review step (see the root `README.md` roadmap), where a person can look at both copies and decide which date is actually right.
+- Misplacement checking only compares a file with its own effective recorded date. It does not reconcile identical content in different date folders; that requires cross-referencing Duplicate Finder output and human review.
+- `get_actual_folder()` returns no folder unless a path has at least `year/month/day/filename` beneath the archive root. The placement checks only report a mismatch when both expected and actual folders are available. Consequently, a dated file at the archive root, in `_review_needed/`, or in another shallow/nonstandard path is **not** reported as misplaced. An undocumented file with no usable date is also marked `correctly_placed: true` because no comparison can be made.
+- The `extensions` filter is applied to files found on disk, but database rows are not filtered. With a non-empty filter, records for other extensions are absent from the disk set and are therefore reported as missing. Use an empty list for a whole-archive reconciliation; treat filtered runs as focused diagnostics rather than a valid global sync result.
 
 ## Usage
 
@@ -53,8 +53,8 @@ python3 audit_archive/audit_archive.py audit_archive/config.json
 | Option         | Default              | Description                                                          |
 |----------------|-----------------------|------------------------------------------------------------------------|
 | `archive_root` | *(required)*          | Path to the archive folder to audit.                                  |
-| `extensions`   | `[]` (all files)      | Optional list of extensions to restrict the scan to, e.g. `["jpg", "mp4"]`. |
-| `output_path`  | `audit_result.json`   | Where to write the JSON report.                                       |
+| `extensions`   | `[]` (all files)      | Optional disk-scan filter, e.g. `["jpg", "mp4"]`. See the filtering limitation above. Values may include or omit the leading dot and are matched case-insensitively. |
+| `output_path`  | `audit_result.json`   | Where to write the JSON report. Relative paths are resolved from the process working directory. |
 
 ## Output
 
@@ -75,7 +75,7 @@ Prints a summary to the terminal, and writes a full report to `output_path`:
     },
     "undocumented_files": [ /* path, file_size, modified_date, date_source, correctly_placed, +expected/actual_folder if misplaced */ ],
     "missing_files": [ /* the full original database row for each missing file */ ],
-    "misplaced_files": [ /* archive_path, expected_relative_path, actual_folder, expected_folder, date_taken */ ]
+    "misplaced_files": [ /* archive_path, expected_relative_path, actual_folder, expected_folder, date_taken, date_source */ ]
 }
 ```
 

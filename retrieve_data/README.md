@@ -29,18 +29,24 @@ details = get_file_details("archive", file_id=12)
 
 ### `list_review_items(archive_root)`
 
-Returns every file currently sitting in the review bucket (`date_uncertain = 1`), most recently added first — the exact list a "files needing a decision" screen would show.
+Returns every database row flagged `date_uncertain = 1`, ordered by `date_added DESC`. This is a database flag query; it does not verify that `archive_path` is actually inside the configured review-folder name.
 
 Returns a list of dicts. Each dict is every column from `archive_files` for that row, plus two computed fields:
 
 | Field           | Description |
 |------------------|--------------|
-| `absolute_path`  | The file's location, resolved to an absolute path regardless of the caller's working directory. |
+| `absolute_path`  | `archive_path` resolved with `Path.resolve()`. Absolute stored paths remain correct; relative stored paths are interpreted from the caller's current working directory, not from `archive_root`. |
 | `file_exists`    | `true`/`false` — whether the file is actually still there on disk. Lets a UI show "this file went missing" without a separate Audit Archive run. |
 
 ### `get_file_details(archive_root, file_id)`
 
 Returns the full record for a single file by its database `id`, or `None` if that id doesn't exist. Same dict shape as `list_review_items()` — meant for a detail view once something's been selected from a list, so a UI never has to special-case "the list view" vs. "the detail view."
+
+## Database and Error Behavior
+
+The module has no CLI or configuration file. `archive_root` may be relative or absolute and must contain an existing `archive_database.db`; otherwise `_connect()` raises `FileNotFoundError`. Other SQLite/schema errors propagate to the caller. Queries use parameter binding for `file_id` and do not issue any `INSERT`, `UPDATE`, `DELETE`, or schema statements.
+
+**Path caveat:** Importer stores `archive_path` using the form derived from its configured `archive_root`. If that root was relative, the stored path is relative too. `_row_to_item_dict()` resolves it against the current process working directory, so the README cannot guarantee cwd-independent paths for such archives. Running consumers from the project root (the normal convention) or using absolute archive roots avoids the ambiguity.
 
 ## Design Note: Everything Is JSON-Serializable
 

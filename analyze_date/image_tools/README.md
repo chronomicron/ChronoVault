@@ -1,6 +1,6 @@
 # image_tools
 
-Every image-format evidence-gathering function `analyze_date` uses lives here, one file per source. All five are real, working, tested code — this isn't a placeholder folder like `audio_tools/` or `video_tools/`.
+Every image-format evidence-gathering function `analyze_date` uses lives here, one file per source. All five contain implemented code; this is not a placeholder folder like `audio_tools/` or `video_tools/`.
 
 None of these are meant to be imported directly by anything outside `analyze_date` — `analyze_date.py`'s `gather_signals()` is the single place that decides which of these to call for a given file, and combines whatever they find. See `analyze_date/README.md` for the full dispatch table and confidence scoring.
 
@@ -14,7 +14,7 @@ None of these are meant to be imported directly by anything outside `analyze_dat
 
 ## `xmp_tools.py`
 
-`get_xmp_datetime(file_path)` — reads `xmp:CreateDate`, `photoshop:DateCreated`, or `xmp:ModifyDate` from a JPEG's embedded XMP packet (Photoshop, Lightroom, etc.). Uses a hand-rolled `xml.etree.ElementTree` parser rather than Pillow's `getxmp()` convenience method, deliberately — see the module's own docstring for why (the same lesson learned from `Image.Exif()` writing being unreliable across Pillow versions applies here too).
+`get_xmp_datetime(file_path)` — reads `xmp:CreateDate`, `photoshop:DateCreated`, or `xmp:ModifyDate` from a JPEG's embedded XMP packet (Photoshop, Lightroom, etc.). The parser searches namespaced XML elements containing text; it does not read the common RDF form where these values are attributes on `rdf:Description`. Uses `xml.etree.ElementTree` rather than Pillow's `getxmp()` convenience method; see the module docstring for the rationale.
 
 ## `tiff_tools.py`
 
@@ -26,6 +26,8 @@ None of these are meant to be imported directly by anything outside `analyze_dat
 
 Originally a separate top-level `ocr_date/` folder; migrated here once the `image_tools/` split happened. If an old `ocr_date/` folder still exists in your project, it's superseded — safe to delete.
 
+OCR requires Pillow plus Tesseract, `pytesseract`, OpenCV, and NumPy. The latter three Python packages are imported only when OCR runs, so they are not dependencies for the other extractors.
+
 ## Common Pattern
 
-Every function here follows the same shape: take whatever raw input it needs (a pre-parsed EXIF dict, or a file path), return `None` (or `(None, None)`, for the two that also report *which* field they matched) if nothing usable was found. None of them raise on missing data — a file with no relevant metadata is a normal, expected case, not an error.
+The metadata extractors take either a pre-parsed EXIF dict or a file path and return `None` (or `(None, None)`) when no usable metadata is found. OCR instead returns a detailed result dictionary containing the accepted match and every attempted crop. It can raise when the image cannot be opened or when an optional OCR dependency or the Tesseract executable is unavailable.
