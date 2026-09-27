@@ -26,7 +26,7 @@ The largest cluster of risks comes from one underlying architectural fact: Chron
 | 16 | Correct Audit Archive layout recognition | Bug | Medium | Small | 12 helpful |
 | 17 | Use shared date analysis for audit recommendations | Architecture | Medium | Medium | 8, 19–21 |
 | 18 | Add dry-run archive reconciliation and repair | Missing functionality | High | Large | 1–6, 12–17 |
-| 19 | Use exact elapsed time for date agreement | Bug | Medium | Tiny | None |
+| 19 | Use exact elapsed time for date agreement | Completed | — | Done | None |
 | 20 | Define and implement timezone-aware date comparison | Data integrity | High | Large | Prefer before 23–25 |
 | 21 | Read XMP RDF attribute-form dates | Bug | Medium | Small | Tests in 33 |
 | 22 | Run OCR only when stronger evidence is inadequate | Reliability | Medium | Small | 8 helpful |
@@ -174,12 +174,12 @@ The largest cluster of risks comes from one underlying architectural fact: Chron
 - **Dependencies / sequencing:** Build only after identity, hash, path, and transaction rules are dependable.
 - **Evidence/status:** Missing planned capability; tracked in `roadmap.md`.
 
-### 19. Use exact elapsed time for date agreement
+### 19. Use exact elapsed time for date agreement — completed
 
 - **Why it matters:** `abs(timedelta.days)` floors to an integer. The configured threshold therefore is not a precise duration and can classify nearly two-day differences as within one day.
 - **Likely scope:** `analyze_date/analyze_date.py` and scoring tests.
 - **Dependencies / sequencing:** None.
-- **Evidence/status:** Confirmed current bug; tracked in `roadmap.md`.
+- **Evidence/status:** Fixed by comparing the exact absolute `timedelta`; focused tests cover both directions just inside, exactly at, and just outside the tolerance.
 
 ### 20. Define and implement timezone-aware date comparison
 
@@ -318,7 +318,6 @@ These are the Tiny/Small items that offer meaningful correctness or workflow val
 | 14 | Add database/configuration preflight checks | Medium | Small |
 | 15 | Fix Audit Archive extension-filter false positives | Medium | Small |
 | 16 | Correct Audit Archive layout recognition | Medium | Small |
-| 19 | Use exact elapsed time for date agreement | Medium | Tiny |
 | 21 | Read XMP RDF attribute-form dates | Medium | Small |
 | 22 | Run OCR only when stronger evidence is inadequate | Medium | Small |
 | 29 | Detect nested ChronoVault archives in source scans | Medium | Small |
@@ -356,7 +355,7 @@ The core root-cause clusters are:
 - **File identity and freshness:** 5–7, 10, 18, 29.
 - **Shared decision ownership:** 8–11, 17, 22.
 - **Path and schema authority:** 12–14, 18, 31.
-- **Date correctness foundation:** 19–25.
+- **Date correctness foundation:** 20–25.
 
 ## Larger projects and features
 

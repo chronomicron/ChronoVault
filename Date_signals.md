@@ -14,7 +14,7 @@ ChronoVault's design is evidence-in, scored-result-out: small extractors produce
 |---|---:|---|---|
 | `file_path` | yes | none | File to inspect. |
 | `readable_exif` | no | `{}` | EXIF mapping already read by the caller. |
-| `mismatch_threshold_days` | no | `1` | Maximum integer-day difference counted as agreement. |
+| `mismatch_threshold_days` | no | `1` | Maximum exact elapsed-time difference counted as agreement. |
 | `file_type` | no | file suffix | Optional dispatch override such as `.tiff`. |
 | `try_ocr` | no | `false` | Enables slow OCR for supported image types. |
 
@@ -68,7 +68,7 @@ It does not currently recognize every locale or date notation; for example, Japa
 5. A primary date before 1972-07-26 or later than the current time is capped at 5.
 6. A result below 50 sets `date_uncertain=true`.
 
-Agreement currently compares `abs((other - primary).days)`. Because `timedelta.days` is an integer floor rather than an exact duration, the default threshold does not behave like a precise 24-hour tolerance around the primary date. This is an implementation limitation, not an intended statistical rule.
+Agreement compares the absolute elapsed time between signals with a `timedelta` built from `mismatch_threshold_days`. A signal exactly at the threshold agrees; any positive amount beyond it disagrees.
 
 The primary signal is selected by base confidence, not by the adjusted final score. A strong signal can therefore remain the chosen date even after several disagreement penalties.
 

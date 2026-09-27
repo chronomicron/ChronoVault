@@ -79,7 +79,6 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 
 ### Date evidence
 
-- Agreement uses integer `timedelta.days`, so the configured threshold is not a precise elapsed-time tolerance.
 - GPS, EXIF, and XMP values are compared without a complete timezone model; XMP offsets are discarded rather than normalized.
 - The XMP parser reads element text but can miss common RDF attribute forms.
 - `analyze_date/config.json` is not loaded by the analyzer.
@@ -135,7 +134,7 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 
 ### Priority 5: broaden evidence and media support
 
-- Correct exact-duration agreement and timezone normalization before adding more high-confidence signals.
+- Correct timezone normalization before adding more high-confidence signals.
 - Support XMP RDF attributes and broader still-image metadata.
 - Add audio tag and video container extractors in their existing placeholder packages.
 - Evaluate external sidecars, Takeout metadata, HEIC/RAW support, and archive-known hash/date evidence.

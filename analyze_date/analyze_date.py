@@ -29,7 +29,7 @@ analyze_date() below doesn't change.
 """
 
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .image_tools.tiff_tools import get_tiff_datetime
 from .image_tools.exif_tools import get_photo_date_from_exif
@@ -271,7 +271,7 @@ def analyze_date(evidence):
 
     agreeing = [
         s for s in others
-        if abs((s['date'] - primary['date']).days) <= mismatch_threshold_days
+        if abs(s['date'] - primary['date']) <= timedelta(days=mismatch_threshold_days)
     ]
     disagreeing = [s for s in others if s not in agreeing]
 

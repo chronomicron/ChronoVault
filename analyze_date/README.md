@@ -81,7 +81,7 @@ After format-specific dispatch, every file type is also checked for a date in it
 Every date signal gathered for a file (from whichever `image_tools/` module found it) is treated as one entry in a list, not as a special case — the combination logic doesn't hardcode "check EXIF, then check GPS." It collects however many signals are available and combines them the same way regardless of how many there are:
 
 1. **Pick a primary signal.** The signal with the highest base confidence becomes the date actually used.
-2. **Check the others for agreement.** The code compares `abs((other_date - primary_date).days)` with `mismatch_threshold_days`. Because `timedelta.days` is an integer floor rather than an exact duration, the default `1`-day setting can treat some differences approaching two days as agreement.
+2. **Check the others for agreement.** The code compares the exact absolute elapsed time with a `timedelta` built from `mismatch_threshold_days`. A difference exactly at the threshold agrees; any amount beyond it disagrees.
 3. **Adjust the score.** Confidence starts at the primary signal's base score, then gets a bonus for each agreeing signal and a penalty for each disagreeing one.
 4. **Cap implausible dates.** If the resulting date is before cameras existed, or in the future, confidence is capped very low no matter what the signals said.
 

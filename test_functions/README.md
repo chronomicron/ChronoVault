@@ -7,6 +7,7 @@ Run them from the `ChronoVault/` project root unless a script's notes say otherw
 ```text
 python3 test_functions/test_env.py
 python3 test_functions/test_analyze_date.py path/to/file.jpg [--type .tiff] [--try-ocr]
+python3 -m unittest test_functions.test_analyze_date_agreement
 python3 test_functions/test_ocr_date.py
 python3 test_functions/test_retrieve_data.py test_functions/test_retrieve_data_config.json
 python3 test_functions/test_write_data.py
@@ -34,6 +35,10 @@ Originally pointed at a standalone `ocr_date/` folder; now imports from `analyze
 
 Shows what `analyze_date()` resolves for one file at a time without running the pipeline. It builds readable EXIF only for JPEG-family types, supports `--type` for dispatch override, and supports `--try-ocr`. The final "Full result" is display-oriented: every value is converted with `str()`, so it is not a type-faithful serialization of the returned dictionary.
 
+## `test_analyze_date_agreement.py`
+
+Focused `unittest` regression coverage for the date-agreement tolerance. It isolates scoring from metadata extraction and verifies that differences just inside and exactly at the configured tolerance agree, while differences just outside it disagree in either direction.
+
 ## A Note on What's Missing
 
-There are no formal automated tests or assertions here, and no all-tests runner in this directory. There are also no focused scripts for Classify Media, Indexer archive listing, Condition Database, Importer, Duplicate Finder, or the unimplemented audio/video metadata extractors. `chronovault.sh` provides the broader contained manual pipeline workflow.
+Other than the focused date-agreement regression test, these remain manual diagnostics rather than a formal suite, and there is no all-tests runner in this directory. There are also no focused scripts for Classify Media, Indexer archive listing, Condition Database, Importer, Duplicate Finder, or the unimplemented audio/video metadata extractors. `chronovault.sh` provides the broader contained manual pipeline workflow.
