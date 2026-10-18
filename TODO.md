@@ -85,10 +85,10 @@ The largest cluster of risks comes from one underlying architectural fact: Chron
 
 ### 6. Add hash-cache freshness and invalidation
 
-- **Why it matters:** Condition Database, Audit Archive, and Duplicate Finder trust non-null cached hashes without recording the size/mtime fingerprint they describe. Replaced-in-place files can be treated as their former content.
-- **Likely scope:** Both schemas and all three hash consumers.
+- **Why it matters:** Cached hashes without a size/mtime fingerprint can describe earlier file contents after an in-place replacement.
+- **Likely scope:** Both schemas and all hash consumers.
 - **Dependencies / sequencing:** Establish one shared fingerprint/invalidation rule before archive-wide deduplication.
-- **Evidence/status:** Confirmed current issue; tracked in `roadmap.md`.
+- **Evidence/status:** Source-inventory freshness is implemented in Condition Database and Duplicate Finder `source` mode using `hash_file_size`, `hash_mtime_ns`, and `hash_computed_at`; legacy hashes without a snapshot are recomputed. Audit Archive and Duplicate Finder `archive` mode still trust cached archive hashes, so this item remains open for archive-side freshness. Metadata fingerprints cannot detect content changes that preserve both size and modification time.
 
 ### 7. Refresh and reconcile previously indexed source paths
 
@@ -113,10 +113,10 @@ The largest cluster of risks comes from one underlying architectural fact: Chron
 
 ### 10. Make source duplicate grouping deterministic and rerunnable
 
-- **Why it matters:** The retained member of a hash group depends on database return order because there is no `ORDER BY`. The duplicate grouping pass is also skipped entirely when no unconditioned rows are found.
+- **Why it matters:** The retained member of a hash group depends on database return order because there is no `ORDER BY`.
 - **Likely scope:** `condition_database/condition_database.py`, duplicate provenance and override behavior.
 - **Dependencies / sequencing:** Apply freshness rules first or concurrently.
-- **Evidence/status:** Confirmed implementation issue; determinism and the skipped rerun behavior are audit findings not clearly isolated in the roadmap.
+- **Evidence/status:** Condition Database now reruns grouping on each invocation and reconsiders its prior `duplicate` rows. Deterministic keeper selection remains unresolved.
 
 ### 11. Add candidate and duplicate decision lifecycle
 
@@ -391,7 +391,6 @@ The roadmap is generally accurate and unusually candid. No whole roadmap section
 
 - The roadmap says the GUI subprocess stop action is abrupt and that running tools can be stopped by terminating their process. The application has no Stop control; only external termination or closing the application is available.
 - Any wording suggesting Indexer’s batch commits preserve partially completed discovery should be qualified: discovered paths are accumulated before storage, so interruption during discovery loses that run’s collected scan results.
-- “Condition Database marks duplicates” needs the caveat that its duplicate pass does not run when there are no newly unconditioned rows.
 
 ### Duplicated roadmap material
 
@@ -409,12 +408,11 @@ Some repetition is useful for priority grouping, but these are the same underlyi
 - Unnecessary suffixing when correcting a file again to its existing date folder.
 - Lack of correction-date validation and correction history.
 - Non-deterministic duplicate keeper selection.
-- Duplicate grouping being skipped when no new conditioning work exists.
 - Indexer’s pre-storage in-memory discovery window.
 - Wrong database paths creating empty SQLite files before failing.
 - The broken `chronovault.sh` retrieve-data invocation and stale option number.
 - `test_write_data.py` requiring an old audit report before producing a fresh one.
-- Duplicate/audit cached file sizes and hashes having no freshness fingerprint.
+- Archive-mode duplicate/audit cached hashes having no freshness fingerprint; source-mode freshness is implemented.
 - Per-file analysis or database exceptions potentially aborting an Importer run without a structured failure record.
 
 One ancillary documentation issue also surfaced: `CHRONOVAULT_HANDOFF.md` says `recontext.sh` is absent and names an older baseline as current, but the script and newer `context-baseline-2026-09-26` tag now exist. That handoff should eventually be refreshed.

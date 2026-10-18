@@ -26,7 +26,7 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 
 ### Conditioning, import, and review
 
-- Condition Database hashes eligible source rows, runs shared date analysis, and marks duplicates within the source inventory.
+- Condition Database validates source hash freshness from hash-time size and nanosecond modification time, runs shared date analysis, and recalculates duplicate groups on each run. Duplicate Finder `source` mode uses the same freshness rule. Metadata fingerprints cannot detect content changes that preserve both size and modification time.
 - Date analysis currently combines JPEG-family GPS/EXIF/XMP, TIFF `DateTime`, filename, folder, filesystem, and opt-in OCR evidence. Audio- and video-specific metadata are not implemented.
 - Importer copies selected sources into dated folders, routes confidence below 50 to `_review_needed/`, and records archive metadata in `archive_database.db`.
 - `retrieve_data` reads review state without mutation. `write_data` applies a chosen date, moves the archive file, and preserves original algorithmic fields while recording correction metadata.
@@ -65,7 +65,7 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 - Audit Archive applies its configured extension filter while walking disk. A documented database row whose file has a currently excluded extension can be reported missing even when it exists.
 - The misplaced-file check derives an expected `YYYY/MM/DD` path from the first three relative path components. Deeper or nonstandard layouts can evade or confuse it.
 - Recommendations for undocumented files use a separate EXIF/filesystem heuristic instead of shared `analyze_date`, so audit and import can disagree.
-- Audit and Duplicate Finder cache hashes without recording file size/mtime or another freshness key. Replaced-in-place files can retain stale hashes.
+- Audit Archive and Duplicate Finder `archive` mode cache hashes without a freshness fingerprint. Replaced-in-place archive files can retain stale hashes; source-inventory freshness is implemented in Condition Database and Duplicate Finder `source` mode.
 - Neither tool offers an approved repair workflow; reports require manual interpretation.
 
 ### Source freshness and indexing
@@ -107,7 +107,7 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 - Add an archive-hash cross-check before copying and define how corrected/high-confidence archive records supply the canonical known date.
 - Make import and correction transitions recoverable: temporary destination names, verified copy completion, coordinated database updates, and explicit restart behavior.
 - Resolve whether Importer consumes conditioned date/classification fields or owns recomputation; then make status and `media_excluded` semantics consistent.
-- Add cache invalidation metadata and verify hashes when a file's size or modification time changes.
+- Add cache invalidation metadata to archive hashes; source-inventory size/mtime snapshots and rehashing are implemented.
 - Add failure-injection tests around copy, move, and database boundaries.
 
 ### Priority 2: make reconciliation actionable

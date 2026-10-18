@@ -42,9 +42,12 @@ Indexer creates this table. It uses `INSERT OR IGNORE` keyed by `file_path`, so 
 | `date_reason` | `TEXT` | Condition Database | Explanation returned by `analyze_date`. |
 | `date_source` | `TEXT` | Condition Database | Primary signal source returned by `analyze_date`. |
 | `date_taken` | `TEXT` | Condition Database | Chosen datetime serialized with `datetime.isoformat()`, or `NULL`. |
-| `file_hash` | `TEXT` | Condition Database or Duplicate Finder source mode | Cached SHA-256 digest. No uniqueness constraint and no size/mtime invalidation metadata. |
+| `file_hash` | `TEXT` | Condition Database or Duplicate Finder source mode | Cached SHA-256 digest. No uniqueness constraint. Source consumers validate it against the hash-time size and nanosecond modification time below; hashes without a complete snapshot are recomputed. |
+| `hash_file_size` | `INTEGER` | Condition Database or Duplicate Finder source mode | File size observed while computing `file_hash`, separate from Indexer's discovery-time `file_size`. |
+| `hash_mtime_ns` | `INTEGER` | Condition Database or Duplicate Finder source mode | `st_mtime_ns` observed with `hash_file_size`. Source hash freshness is derived by comparing both values with the current file. |
+| `hash_computed_at` | `TEXT` | Condition Database or Duplicate Finder source mode | UTC timestamp recorded after a stable SHA-256 computation. Informational; freshness is determined from the size/mtime comparison. |
 
-Classify Media and Condition Database add their columns only when they run. A newly created Indexer database therefore does not initially contain these fields.
+Classify Media, Condition Database, and Duplicate Finder source mode add their enrichment/hash columns only when they run. A newly created Indexer database therefore does not initially contain these fields.
 
 For an older compatible inventory, Indexer adds `source_filesystem_uuid` with a repeatable `ALTER TABLE` migration after its read-only preflight. Existing rows are preserved. A later scan can backfill this field for rediscovered paths whose UUID remains `NULL`; it does not refresh other row data or replace a UUID already recorded.
 
@@ -122,7 +125,7 @@ The table is intended to describe copied archive files, but it is not guaranteed
 |---|---|---|---|
 | `confidence` | `INTEGER` | Importer | Date-analysis confidence stored with a new archive row. Importer ensures this column for older databases. |
 | `date_reason` | `TEXT` | Importer | Analyzer explanation stored with a new archive row. Importer ensures this column for older databases. |
-| `file_hash` | `TEXT` | Audit Archive or Duplicate Finder archive mode | Cached SHA-256 digest for documented files. Existing non-`NULL` values are trusted without checking current size or modification time. |
+| `file_hash` | `TEXT` | Audit Archive or Duplicate Finder archive mode | Cached SHA-256 digest for documented files. Archive-mode freshness is not yet checked; existing non-`NULL` values are trusted without comparing current file metadata. |
 | `user_corrected_date` | `TEXT` | `write_data` | Latest manual correction as an ISO string. Original analyzer fields remain unchanged. |
 | `corrected_at` | `TEXT` | `write_data` | Timestamp of the latest manual correction. Earlier correction history is not retained. |
 
@@ -140,7 +143,7 @@ In normal Importer processing an accessible source file supplies a filesystem si
 
 - Importer copies the file, marks the source row `imported`, then inserts the archive row with `INSERT OR IGNORE`. A failure or ignored uniqueness conflict can leave disk/source state without a newly recorded archive row.
 - Importer recomputes date evidence and does not read Condition Database's stored `date_taken`, `date_source`, `confidence`, or `date_reason`.
-- Audit Archive and Duplicate Finder may cache hashes but do not invalidate them after in-place file changes.
+- Condition Database and Duplicate Finder source mode validate cached hashes against `hash_file_size` and `hash_mtime_ns`. Audit Archive and Duplicate Finder archive mode still trust cached hashes after in-place file changes.
 - `write_data` moves the file before updating `archive_path`; a later SQL failure can leave the database pointing to the old location.
 - Audit Archive treats `user_corrected_date` as authoritative over `date_taken` when checking recognized date folders.
 - `retrieve_data` and `write_data` resolve stored relative paths using the process working directory, which can differ from the directory used by Importer.
