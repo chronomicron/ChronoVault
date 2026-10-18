@@ -9,7 +9,7 @@ Given a starting folder and a JSON configuration file, Indexer recursively walks
 Indexer is **accumulative and safe to run repeatedly**:
 
 - It can be run multiple times against different folders (an old HDD, a USB key, a NAS mount, a cloud-synced folder), and every run adds to the same database rather than replacing it.
-- If a file path is already in the database, Indexer skips it rather than adding a duplicate row. It does not refresh that row's size, timestamps, status, classification, hash, or date fields if the file later changes in place.
+- If a file path is already in the database, Indexer skips it rather than adding a duplicate row. It does not refresh that row's size, timestamps, status, classification, hash, or date fields if the file later changes in place. The one exception is that a missing source filesystem UUID is filled when the path is rediscovered and a UUID can now be resolved.
 - Indexer never deletes, modifies, or touches the original files in any way. It only reads and logs.
 
 Each entry starts with a status of `located`. Later stages of the pipeline (like Importer) update that status as files move through the archive process.
@@ -71,7 +71,7 @@ This searches everything under `~/Pictures`, recursively, and logs any matching 
 
 Before opening the inventory database for writing, Indexer validates the configuration, confirms the search path exists and is a directory, and checks the database target. `database_path` must be a non-empty path, `extensions` must be a non-empty list of extension strings, `archive_extensions` must be a list of extension strings when provided, and `look_inside_archives` must be a boolean. The database's parent directory must already exist.
 
-On a first run, a database file that does not yet exist is allowed and Indexer creates it after these checks pass. An existing database is inspected read-only first. It must contain a compatible `located_files` table with the Indexer base columns and a unique `file_path`; if `located_archives` already exists, it must have the expected Indexer columns and unique `archive_path`. Extra columns added by Classify Media, Condition Database, and other ChronoVault tools are allowed. An absent `located_archives` table is created as before. Empty SQLite files, archive databases, unrelated databases, and incompatible Indexer schemas are rejected before Indexer changes them.
+On a first run, a database file that does not yet exist is allowed and Indexer creates it after these checks pass. An existing database is inspected read-only first. It must contain a compatible `located_files` table with the Indexer base columns and a unique `file_path`; if `located_archives` already exists, it must have the expected Indexer columns and unique `archive_path`. Extra columns added by Classify Media, Condition Database, and other ChronoVault tools are allowed. After validation, Indexer safely adds its nullable `source_filesystem_uuid` column to older inventories if needed, preserving existing rows and other columns. An absent `located_archives` table is created as before. Empty SQLite files, archive databases, unrelated databases, and incompatible Indexer schemas are rejected before Indexer changes them.
 
 These checks run in the Indexer CLI logic, so GUI launches that invoke Indexer receive the same validation. The existing `archive_database.db` source-root guard still runs and still requires `--allow-archive-source` to override.
 
@@ -161,6 +161,7 @@ Indexer creates and maintains a table called `located_files`:
 | `creation_date`     | TEXT    | File system creation timestamp                     |
 | `modification_date` | TEXT    | File system last-modified timestamp                |
 | `status`            | TEXT    | Pipeline status — starts as `located`               |
+| `source_filesystem_uuid` | TEXT or NULL | UUID of the filesystem containing the file, when available. This identifies the filesystem/partition, not the physical disk. |
 | `file_hash`         | TEXT    | SHA-256 hash of the file's contents. Not set by Indexer — added later, automatically, the first time Condition Database or Duplicate Finder (`source` mode) runs against this database. `NULL` until then. |
 
 Indexer also creates a second table, `located_archives`, for detected compressed/disc-image files — kept deliberately separate from `archive_files` (the table Importer creates inside `archive_database.db`), since those two names mean genuinely different things: one is "an archive file Indexer found on a source drive," the other is "a file already copied into the ChronoVault archive."
@@ -181,8 +182,9 @@ Both tables are created automatically the first time Indexer runs, if they don't
 ## Notes
 
 - Indexer only reads filesystem metadata for ordinary media files; no EXIF/content inspection occurs here. `creation_date` is derived from `st_ctime`, which is metadata-change time rather than birth/creation time on typical Linux filesystems. Archives are the exception: optional listing reads container/filesystem structures but never extracts members.
+- `source_filesystem_uuid` is resolved with Linux `findmnt` from the mounted filesystem containing each discovered file. Lookup is cached by the file's device number for the duration of a scan, so one filesystem is queried at most once per scan. If `findmnt` is unavailable, lookup fails, or the filesystem has no UUID, Indexer continues and stores `NULL`; it never substitutes a mount path. Existing rows receive a UUID only when rediscovered and their field is still `NULL`. This does not reconstruct paths after mount relocation or refresh UUIDs already recorded.
 - The walk collects paths in memory before database storage begins. An `OSError` during the walk is caught: files found before that error are then stored, and Indexer exits with status 1. A hard kill/crash during discovery can still lose the not-yet-stored discovery list. Media inserts commit every 100 attempted paths; archive rows commit one at a time.
-- Directory symlinks are not explicitly followed by the implementation's `Path.rglob()` walk.
+- Directory symlinks are not explicitly followed by the implementation's top-down `os.walk()` traversal.
 - Archive extensions take precedence if a filename matches both the media and archive extension sets; that path is recorded only in `located_archives`.
 - A failed archive listing is retried on a later listing-enabled run. However, rerunning with `look_inside_archives: false` updates an unsuccessfully listed row with `note = NULL`, clearing the earlier failure explanation. Summary counters also under-report an already-known, not-yet-listed archive when listing is disabled: it is neither `newly_recorded` nor `already_known`.
 - Extracting listed archive members for review/import is not built. See `roadmap.md`'s candidate-review notes.

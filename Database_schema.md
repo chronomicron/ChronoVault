@@ -15,7 +15,7 @@ SQLite's dynamic typing also means the declared types below are affinities rathe
 
 ## 1.1 `located_files`
 
-Indexer creates this table. It uses `INSERT OR IGNORE` keyed by `file_path`, so an already-known path is not refreshed when its size, timestamps, contents, or status change. Paths are stored as strings produced from the supplied search path; they are not forced to be absolute.
+Indexer creates this table. It uses `INSERT OR IGNORE` keyed by `file_path`, so an already-known path is not refreshed when its size, timestamps, contents, or status change. The exception is `source_filesystem_uuid`: when an existing path is rediscovered, Indexer fills that field only if it is currently `NULL` and a UUID is available. Paths are stored as strings produced from the supplied search path; they are not forced to be absolute.
 
 ### Base columns created by Indexer
 
@@ -28,6 +28,7 @@ Indexer creates this table. It uses `INSERT OR IGNORE` keyed by `file_path`, so 
 | `creation_date` | `TEXT` | ISO datetime derived from `st_ctime`; on typical Linux filesystems this is metadata-change time, not true creation time. |
 | `modification_date` | `TEXT` | ISO datetime derived from `st_mtime`. |
 | `status` | `TEXT DEFAULT 'located'` | Shared pipeline status; values currently used are described below. |
+| `source_filesystem_uuid` | `TEXT` (nullable) | UUID of the filesystem containing the source file, when available. Identifies a filesystem/partition, not the physical disk. Indexer resolves it with Linux `findmnt`; when unavailable or absent it stores `NULL`. |
 
 ### Columns added later with `ALTER TABLE`
 
@@ -44,6 +45,8 @@ Indexer creates this table. It uses `INSERT OR IGNORE` keyed by `file_path`, so 
 | `file_hash` | `TEXT` | Condition Database or Duplicate Finder source mode | Cached SHA-256 digest. No uniqueness constraint and no size/mtime invalidation metadata. |
 
 Classify Media and Condition Database add their columns only when they run. A newly created Indexer database therefore does not initially contain these fields.
+
+For an older compatible inventory, Indexer adds `source_filesystem_uuid` with a repeatable `ALTER TABLE` migration after its read-only preflight. Existing rows are preserved. A later scan can backfill this field for rediscovered paths whose UUID remains `NULL`; it does not refresh other row data or replace a UUID already recorded.
 
 ### Current `status` values
 

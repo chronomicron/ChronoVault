@@ -18,7 +18,7 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 
 ### Discovery and source inventory
 
-- Indexer recursively discovers configured extensions, including dot-prefixed directories, and accumulates rows in `located_files.db`.
+- Indexer recursively discovers configured extensions, including dot-prefixed directories, and accumulates rows in `located_files.db`. It records the source filesystem UUID when Linux `findmnt` can resolve one, caching lookups by device during each scan.
 - It refuses a source root that already contains `archive_database.db` unless explicitly overridden. During a broader scan, it detects nested directories containing that marker, reports them, and prunes those subtrees while continuing through siblings.
 - ZIP, TAR-family, and ISO files can be recorded in `located_archives`. Optional listing records matching member names; ZIP/TAR paths are exercised by generated fixtures, while successful ISO listing still needs a real-file verification.
 - Archive members are not extracted or added to the media workflow.
@@ -70,7 +70,7 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 
 ### Source freshness and indexing
 
-- Re-indexing an existing path does not refresh size or timestamps because `file_path` uniqueness turns rediscovery into an ignored insert.
+- Re-indexing an existing path does not refresh size or timestamps because `file_path` uniqueness turns rediscovery into an ignored insert. A missing source filesystem UUID is the exception: Indexer fills it on rediscovery when a UUID is available.
 - Relative database, source, archive, and report paths remain dependent on the process working directory.
 - Archive member matching stops after 500 names. `matching_file_count` is therefore a stored capped-list length, not necessarily the archive's full match count.
 - A later successful archive listing can clear a previous failure note, which loses failure history.

@@ -38,6 +38,7 @@ import json
 import sys
 import sqlite3
 import os
+import subprocess
 from pathlib import Path
 from datetime import datetime
 
@@ -312,11 +313,23 @@ def init_database(db_path):
             file_size INTEGER,
             creation_date TEXT,
             modification_date TEXT,
-            status TEXT DEFAULT 'located'
+            status TEXT DEFAULT 'located',
+            source_filesystem_uuid TEXT
         )
     ''')
     conn.commit()
+    ensure_source_filesystem_uuid_column(conn)
     return conn
+
+
+def ensure_source_filesystem_uuid_column(conn):
+    """Add the nullable UUID field to older inventories without changing rows."""
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(located_files)")
+    columns = {row[1] for row in cursor.fetchall()}
+    if 'source_filesystem_uuid' not in columns:
+        cursor.execute("ALTER TABLE located_files ADD COLUMN source_filesystem_uuid TEXT")
+        conn.commit()
 
 
 def init_archive_table(conn):
@@ -439,6 +452,35 @@ def find_files_and_archives(
 COMMIT_BATCH_SIZE = 100
 
 
+def resolve_filesystem_uuid(file_path, device_id, uuid_cache):
+    """Resolve and cache the source filesystem UUID by device number for this scan."""
+    if device_id in uuid_cache:
+        return uuid_cache[device_id]
+
+    filesystem_uuid = None
+    try:
+        result = subprocess.run(
+            [
+                'findmnt', '--noheadings', '--output', 'UUID',
+                '--target', str(file_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        candidate = result.stdout.strip()
+        if result.returncode == 0 and candidate and candidate != '-' and len(candidate.splitlines()) == 1:
+            filesystem_uuid = candidate
+    except (OSError, subprocess.SubprocessError):
+        # Unsupported platforms, missing findmnt, and lookup failures should
+        # not prevent the source file from being indexed.
+        pass
+
+    uuid_cache[device_id] = filesystem_uuid
+    return filesystem_uuid
+
+
 def store_files(conn, files):
     """
     Insert found media files into the database. Skips files already
@@ -453,6 +495,7 @@ def store_files(conn, files):
     cursor = conn.cursor()
     inserted = 0
     skipped = 0
+    uuid_cache = {}
 
     for i, file_path in enumerate(files, 1):
         try:
@@ -461,17 +504,26 @@ def store_files(conn, files):
             file_size = stat.st_size
             creation_date = datetime.fromtimestamp(stat.st_ctime).isoformat()
             modification_date = datetime.fromtimestamp(stat.st_mtime).isoformat()
+            filesystem_uuid = resolve_filesystem_uuid(file_path, stat.st_dev, uuid_cache)
 
             cursor.execute('''
                 INSERT OR IGNORE INTO located_files
-                (file_path, file_extension, file_size, creation_date, modification_date, status)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (str(file_path), file_extension, file_size, creation_date, modification_date, 'located'))
+                (file_path, file_extension, file_size, creation_date, modification_date,
+                 status, source_filesystem_uuid)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (str(file_path), file_extension, file_size, creation_date,
+                  modification_date, 'located', filesystem_uuid))
 
             if cursor.rowcount > 0:
                 inserted += 1
             else:
                 skipped += 1
+                if filesystem_uuid is not None:
+                    cursor.execute('''
+                        UPDATE located_files
+                        SET source_filesystem_uuid = ?
+                        WHERE file_path = ? AND source_filesystem_uuid IS NULL
+                    ''', (filesystem_uuid, str(file_path)))
 
         except OSError as e:
             print(f"Warning: Could not read metadata for '{file_path}': {e}")
@@ -711,11 +763,10 @@ def looks_like_chronovault_archive(root_path):
     piece behaves exactly as designed, and the result is still entirely
     wrong. This check exists to catch that before any scanning starts.
 
-    Deliberately checks only the search root itself, not the whole tree
-    beneath it -- catches exactly this case (pointing directly at an
-    archive), not the rarer case of an archive nested somewhere deep
-    inside a larger folder being scanned. That deeper case is a known,
-    accepted gap, not something this check claims to solve.
+    This direct-root guard runs before the database is opened. During the
+    subsequent top-down scan, nested archive roots are detected and pruned
+    separately; the explicit override on a selected archive root preserves
+    full-scan behavior for deliberate archive migrations.
     """
     return (Path(root_path) / "archive_database.db").exists()
 
