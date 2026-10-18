@@ -5,6 +5,9 @@ import hashlib
 from pathlib import Path
 from datetime import datetime
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from source_inventory_hash import ensure_source_hash_columns, file_fingerprint, hash_source_file, is_fresh
+
 
 def load_config(config_file):
     """Load the duplicate_finder configuration from JSON."""
@@ -42,13 +45,8 @@ def load_config(config_file):
 
 
 def ensure_hash_column_source(conn):
-    """Add a file_hash column to located_files if it doesn't already exist."""
-    cursor = conn.cursor()
-    cursor.execute("PRAGMA table_info(located_files)")
-    columns = [row[1] for row in cursor.fetchall()]
-    if 'file_hash' not in columns:
-        cursor.execute("ALTER TABLE located_files ADD COLUMN file_hash TEXT")
-        conn.commit()
+    """Migrate the source inventory's hash and freshness columns."""
+    ensure_source_hash_columns(conn)
 
 
 def ensure_hash_column_archive(conn):
@@ -145,16 +143,21 @@ def get_rows_to_check(conn, statuses_to_check):
     cursor = conn.cursor()
     placeholders = ','.join('?' * len(statuses_to_check))
     cursor.execute(f'''
-        SELECT id, file_path, file_size, file_hash FROM located_files
+        SELECT id, file_path, file_size, file_hash, hash_file_size, hash_mtime_ns
+        FROM located_files
         WHERE status IN ({placeholders})
     ''', statuses_to_check)
     return cursor.fetchall()
 
 
-def update_hash(conn, file_id, file_hash):
-    """Cache a computed hash back into the database so future runs don't re-hash the same file."""
+def update_hash(conn, file_id, snapshot):
+    """Cache a computed hash and its file-state fingerprint."""
     cursor = conn.cursor()
-    cursor.execute("UPDATE located_files SET file_hash = ? WHERE id = ?", (file_hash, file_id))
+    file_hash, file_size, mtime_ns, computed_at = snapshot
+    cursor.execute("""
+        UPDATE located_files SET file_hash = ?, hash_file_size = ?, hash_mtime_ns = ?,
+            hash_computed_at = ? WHERE id = ?
+    """, (file_hash, file_size, mtime_ns, computed_at, file_id))
     conn.commit()
 
 
@@ -180,24 +183,48 @@ def run_source_mode(options, output_path):
     hashed_now = 0
     already_hashed = 0
 
-    for idx, (file_id, file_path, file_size, existing_hash) in enumerate(rows, 1):
+    for idx, (file_id, file_path, _indexed_size, existing_hash, cached_size, cached_mtime_ns) in enumerate(rows, 1):
         progress_label = f"[{idx}/{len(rows)}]"
         source = Path(file_path)
 
         if not source.exists():
             print(f"{progress_label} MISSING: {file_path}")
+            conn.execute("""
+                UPDATE located_files SET file_hash = NULL, hash_file_size = NULL,
+                    hash_mtime_ns = NULL, hash_computed_at = NULL WHERE id = ?
+            """, (file_id,))
+            conn.commit()
             missing += 1
             continue
 
-        if existing_hash:
+        try:
+            current_size, current_mtime_ns = file_fingerprint(source)
+        except OSError as error:
+            print(f"{progress_label} UNAVAILABLE: {file_path}: {error}")
+            conn.execute("""
+                UPDATE located_files SET file_hash = NULL, hash_file_size = NULL,
+                    hash_mtime_ns = NULL, hash_computed_at = NULL WHERE id = ?
+            """, (file_id,))
+            conn.commit()
+            missing += 1
+            continue
+
+        if is_fresh(existing_hash, cached_size, cached_mtime_ns, current_size, current_mtime_ns):
             already_hashed += 1
             continue
 
-        print(f"{progress_label} Hashing: {file_path} ({format_size(file_size)})")
-        file_hash = compute_file_hash(source, file_size)
-        if file_hash:
-            update_hash(conn, file_id, file_hash)
+        print(f"{progress_label} Hashing: {file_path} ({format_size(current_size)})")
+        snapshot = hash_source_file(source)
+        if snapshot:
+            update_hash(conn, file_id, snapshot)
             hashed_now += 1
+        else:
+            print(f"{progress_label} UNSTABLE/FAILED: {file_path}; hash cache cleared")
+            conn.execute("""
+                UPDATE located_files SET file_hash = NULL, hash_file_size = NULL,
+                    hash_mtime_ns = NULL, hash_computed_at = NULL WHERE id = ?
+            """, (file_id,))
+            conn.commit()
 
     print("-" * 60)
     print(f"Newly hashed: {hashed_now}")
@@ -209,8 +236,8 @@ def run_source_mode(options, output_path):
     conn.close()
 
     entries = [
-        {'label': file_path, 'file_size': file_size, 'file_hash': file_hash, 'documented': True}
-        for _id, file_path, file_size, file_hash in rows if file_hash
+        {'label': file_path, 'file_size': hash_size, 'file_hash': file_hash, 'documented': True}
+        for _id, file_path, _indexed_size, file_hash, hash_size, _hash_mtime_ns in rows if file_hash
     ]
 
     extra_summary = {}
@@ -365,4 +392,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+

@@ -28,7 +28,6 @@ Usage:
 import sys
 import json
 import sqlite3
-import hashlib
 from pathlib import Path
 from datetime import datetime
 
@@ -36,6 +35,7 @@ from datetime import datetime
 # directory, matching the convention used by importer.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from analyze_date.analyze_date import analyze_date
+from source_inventory_hash import ensure_source_hash_columns, file_fingerprint, hash_source_file, is_fresh
 
 
 def load_config(config_file):
@@ -72,36 +72,57 @@ def ensure_column(conn, table, column, column_type):
         conn.commit()
 
 
-def format_size(num_bytes):
-    size = float(num_bytes)
-    for unit in ["B", "KB", "MB", "GB", "TB"]:
-        if size < 1024:
-            return f"{size:.1f}{unit}"
-        size /= 1024
-    return f"{size:.1f}PB"
+def refresh_source_hashes(conn):
+    """Refresh unknown/stale hashes for eligible source rows, then regroup.
 
+    Condition Database owns the `duplicate` status, so its prior duplicate
+    rows are temporarily reactivated and considered alongside `located` rows.
+    Other statuses are left untouched.
+    """
+    cursor = conn.cursor()
+    cursor.execute("UPDATE located_files SET status = 'located' WHERE status = 'duplicate'")
+    cursor.execute("""
+        SELECT id, file_path, file_hash, hash_file_size, hash_mtime_ns
+        FROM located_files WHERE status = 'located'
+    """)
+    rows = cursor.fetchall()
+    refreshed = 0
+    failed = 0
+    for row in rows:
+        file_id, file_path, cached_hash, cached_size, cached_mtime_ns = row
+        try:
+            current_size, current_mtime_ns = file_fingerprint(file_path)
+        except OSError:
+            cursor.execute("""
+                UPDATE located_files SET file_hash = NULL, hash_file_size = NULL,
+                    hash_mtime_ns = NULL, hash_computed_at = NULL WHERE id = ?
+            """, (file_id,))
+            failed += 1
+            continue
 
-def compute_file_hash(file_path, file_size):
-    """SHA-256 in 4MB chunks, with a live progress readout for large files -- same convention as audit_archive/duplicate_finder."""
-    sha256 = hashlib.sha256()
-    chunk_size = 4 * 1024 * 1024
-    read_bytes = 0
-    show_progress = file_size >= 20 * 1024 * 1024
+        if is_fresh(cached_hash, cached_size, cached_mtime_ns, current_size, current_mtime_ns):
+            continue
 
-    with open(file_path, 'rb') as f:
-        while True:
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
-            sha256.update(chunk)
-            read_bytes += len(chunk)
-            if show_progress:
-                percent = (read_bytes / file_size) * 100
-                print(f"\r    hashing: {format_size(read_bytes)} / {format_size(file_size)} ({percent:.1f}%)",
-                      end='', flush=True)
-    if show_progress:
-        print()
-    return sha256.hexdigest()
+        print(f"    Hashing source: {file_path} ({current_size} bytes)")
+        snapshot = hash_source_file(file_path)
+        if snapshot is None:
+            cursor.execute("""
+                UPDATE located_files SET file_hash = NULL, hash_file_size = NULL,
+                    hash_mtime_ns = NULL, hash_computed_at = NULL WHERE id = ?
+            """, (file_id,))
+            print(f"    UNSTABLE/FAILED hash: {file_path}; hash cache cleared")
+            failed += 1
+            continue
+
+        file_hash, file_size, mtime_ns, computed_at = snapshot
+        cursor.execute("""
+            UPDATE located_files
+            SET file_hash = ?, hash_file_size = ?, hash_mtime_ns = ?, hash_computed_at = ?
+            WHERE id = ?
+        """, (file_hash, file_size, mtime_ns, computed_at, file_id))
+        refreshed += 1
+    conn.commit()
+    return refreshed, failed
 
 
 def get_readable_exif(file_path, file_extension):
@@ -140,31 +161,15 @@ def main():
     ensure_column(conn, 'located_files', 'date_reason', 'TEXT')
     ensure_column(conn, 'located_files', 'date_source', 'TEXT')
     ensure_column(conn, 'located_files', 'date_taken', 'TEXT')
-    # BUG FIX: file_hash was never ensured here previously. The old
-    # assumption -- "file_hash already exists, added earlier by Duplicate
-    # Finder's source mode" -- doesn't hold in the documented pipeline
-    # order (Indexer -> Condition Database -> Importer -> Audit ->
-    # Duplicate Finder). Duplicate Finder runs LAST, so the very first
-    # time this tool runs right after Indexer, the column has never been
-    # created. Without this line, every per-file row['file_hash'] access
-    # below raised IndexError (silently swallowed by the broad try/except
-    # around it, printed as "FAILED" for every single file), and the
-    # final duplicate-check query -- which references file_hash directly
-    # in raw SQL, outside that try/except -- crashed outright with
-    # "sqlite3.OperationalError: no such column: file_hash". Confirmed
-    # directly: a fresh located_files.db right after Indexer genuinely
-    # has no file_hash column at all.
-    ensure_column(conn, 'located_files', 'file_hash', 'TEXT')
+    ensure_source_hash_columns(conn)
+
+    refreshed_hashes, hash_failures = refresh_source_hashes(conn)
+    print(f"Source hash snapshots refreshed: {refreshed_hashes}; unavailable/unstable: {hash_failures}")
 
     # Only files not yet conditioned -- confidence IS NULL is the marker,
     # giving natural idempotency without needing a separate flag column.
     cursor.execute("SELECT * FROM located_files WHERE status = 'located' AND confidence IS NULL")
     rows = cursor.fetchall()
-
-    if not rows:
-        print("No unconditioned files found (status='located' AND confidence IS NULL). Nothing to do.")
-        conn.close()
-        return
 
     print(f"Found {len(rows)} file(s) to condition.")
     print("-" * 60)
@@ -185,10 +190,6 @@ def main():
         print(f"[{idx}/{len(rows)}] {file_path}")
 
         try:
-            file_size = path_obj.stat().st_size
-            existing_hash = row['file_hash']
-            file_hash = existing_hash if existing_hash else compute_file_hash(file_path, file_size)
-
             readable_exif = get_readable_exif(file_path, row['file_extension'])
             result = analyze_date({
                 'file_path': file_path,
@@ -199,10 +200,10 @@ def main():
 
             cursor.execute('''
                 UPDATE located_files
-                SET file_hash = ?, confidence = ?, date_reason = ?, date_source = ?, date_taken = ?
+                SET confidence = ?, date_reason = ?, date_source = ?, date_taken = ?
                 WHERE id = ?
             ''', (
-                file_hash, result['confidence'], result['reason'], result['date_source'],
+                result['confidence'], result['reason'], result['date_source'],
                 result['date_taken'].isoformat() if result['date_taken'] else None,
                 file_id
             ))
@@ -272,4 +273,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+

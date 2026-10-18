@@ -16,12 +16,12 @@ Both modes produce the same kind of report at the end — grouped by hash, sorte
 
 Hashing is the expensive part, so both modes try hard to avoid redoing it:
 
-- **`source` mode** caches hashes into `located_files.file_hash` (added via `ALTER TABLE` on first use). A row with any existing hash is trusted and not re-read. Missing source files are counted and printed, but are omitted from grouping and from the JSON summary.
+- **`source` mode** caches hashes into `located_files.file_hash` (with freshness columns added via repeatable `ALTER TABLE` migrations). It reuses a hash only when its stored hash-time size and nanosecond modification time match the current source file. Legacy hashes without a snapshot are rehashed. Missing or unstable files have their cached hash cleared and are omitted from grouping and from the JSON summary.
 - **`archive` mode** is a little more nuanced, because a file here can be in one of two states:
   - **Documented** (it has a row in `archive_database.db`) — uses the hash Audit Archive already cached, if one exists. If not (e.g. Duplicate Finder is run before Audit Archive ever has been), it computes and caches it itself, so either tool can be the one that ends up filling that column in.
   - **Undocumented** (on disk, but no database row — e.g. copied in by hand) — there's no row to cache a hash *into*, so these are hashed fresh on every single run. This is inherent to the situation, not a missed optimization: an undocumented file has nowhere to persist a cached value until it's actually added to the database.
 
-Either way, files ≥20MB show a live `hashing: X / Y (Z%)` progress readout while being hashed, same convention used by Importer and Audit Archive, so a multi-gigabyte video doesn't look like it's frozen.
+Files ≥20MB show a live `hashing: X / Y (Z%)` progress readout while being hashed, same convention used by Importer and Audit Archive, so a multi-gigabyte video doesn't look like it's frozen.
 
 ## Grouping and Reporting
 
@@ -81,7 +81,9 @@ python3 duplicate_finder/duplicate_finder.py duplicate_finder/config.json
 
 ## Operational Notes and Known Limitations
 
-- Cached hashes have no file-size, modification-time, or other invalidation check. If a file changes in place after its hash is cached, later runs continue trusting the stale hash until the database value is cleared manually. This affects both source rows and documented archive files.
+- `source` mode derives hash freshness from `hash_file_size` and `hash_mtime_ns` in `located_files`; `hash_computed_at` records when the digest was computed. A source file that changes while being read is retried twice after the initial attempt, then omitted with its cached hash cleared if it remains unstable.
+- Metadata-based source freshness cannot detect content changes that preserve both size and modification time.
+- `archive` mode still trusts cached hashes for documented archive files without freshness checking. Archive-mode freshness is outside this source-inventory change.
 - Archive mode only considers files currently on disk. Database rows whose files are missing are not reported; use Audit Archive for reconciliation.
 - Source mode requires the Indexer schema, and archive mode requires the Importer schema. Pointing SQLite at a nonexistent database path can create an empty file before the tool fails on the missing table.
 - Hash failures are printed and skipped rather than included as structured report entries.
