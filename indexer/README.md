@@ -99,9 +99,11 @@ what you're doing, re-run with --allow-archive-source to proceed anyway.
 python3 indexer/indexer.py indexer/config.json /path/to/old_archive --allow-archive-source
 ```
 
-**Known, accepted limitation:** this only checks the search path itself, not the whole tree beneath it. An archive nested somewhere deep inside a much larger folder being scanned (rather than being the exact path given) won't be caught. This matches the reported case exactly (pointing directly at an archive) without adding the complexity of scanning ahead of time for a rarer, deeper scenario.
+When the selected source root is a broader directory, Indexer also detects nested directories containing `archive_database.db` during its normal top-down walk. It reports each nested archive root and prunes that subtree before indexing files from it; sibling directories under the selected root continue to be scanned. No second filesystem walk is needed. If the selected root itself is an archive and `--allow-archive-source` is provided, Indexer preserves the explicit override's prior full-scan behavior, including its subdirectories.
 
-The GUI performs the identical check (reusing this same function, not a separate copy) and shows a confirmation dialog instead of a terminal error — declining defaults to **not** proceeding.
+This skip only affects discovery on the current run. It does not remove rows that may already exist in `located_files` from an earlier scan.
+
+For a selected root that is itself an archive, the GUI reuses the same direct-root check and shows a confirmation dialog instead of a terminal error — declining defaults to **not** proceeding. When nested archives are skipped, their paths appear in the streamed Indexer output.
 
 You can run Indexer again with a different path to add more locations to the same inventory:
 

@@ -19,7 +19,7 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 ### Discovery and source inventory
 
 - Indexer recursively discovers configured extensions, including dot-prefixed directories, and accumulates rows in `located_files.db`.
-- It refuses a source root that already contains `archive_database.db` unless explicitly overridden. This guard does not detect a ChronoVault archive nested below a broader source root.
+- It refuses a source root that already contains `archive_database.db` unless explicitly overridden. During a broader scan, it detects nested directories containing that marker, reports them, and prunes those subtrees while continuing through siblings.
 - ZIP, TAR-family, and ISO files can be recorded in `located_archives`. Optional listing records matching member names; ZIP/TAR paths are exercised by generated fixtures, while successful ISO listing still needs a real-file verification.
 - Archive members are not extracted or added to the media workflow.
 - Classify Media scores images conservatively and records its category, reason, and exclusion flag before hashing.

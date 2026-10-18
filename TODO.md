@@ -36,7 +36,7 @@ The largest cluster of risks comes from one underlying architectural fact: Chron
 | 26 | Persist Indexer discovery incrementally | Reliability | Medium | Medium | 13 helpful; supports 30 |
 | 27 | Correct and verify archive-container listing state | Reliability | Medium | Medium | 33, 34 helpful |
 | 28 | Add safely staged archive-member extraction | Missing functionality | Medium | Large | 11–13, 27 |
-| 29 | Detect nested ChronoVault archives in source scans | Reliability | Medium | Small | 5 eventually supersedes part |
+| 29 | Detect nested ChronoVault archives in source scans | Completed | — | Done | None |
 | 30 | Add controlled GUI cancellation | UX / Reliability | Medium | Medium | 1, 2, 4, 26 |
 | 31 | Introduce a unified per-run path/configuration context | Architecture / UX | High | Medium | 12, 14 |
 | 32 | Add GUI review, duplicate, and repair workflows | Feature / UX | Medium | Very large | 11, 18, 31 |
@@ -246,10 +246,10 @@ The largest cluster of risks comes from one underlying architectural fact: Chron
 
 ### 29. Detect nested ChronoVault archives in source scans
 
-- **Why it matters:** The source guard checks only for `archive_database.db` directly under the chosen root. Selecting a broader parent containing an archive can re-index archived files and create repeated copies.
-- **Likely scope:** Indexer preflight and GUI warning.
+- **Why it matters:** Before nested-root pruning, selecting a broader parent containing an archive could re-index archived files and create repeated copies.
+- **Likely scope:** Indexer traversal; the GUI displays its streamed skipped-root report.
 - **Dependencies / sequencing:** Archive-wide hash prevention later provides a second defense.
-- **Evidence/status:** Confirmed known limitation; tracked in `roadmap.md`.
+- **Evidence/status:** Implemented in Indexer. Its top-down scan reports and prunes nested archive roots while continuing through sibling directories; the selected-root archive guard and explicit override are unchanged.
 
 ### 30. Add controlled GUI cancellation
 
@@ -320,7 +320,6 @@ These are the Tiny/Small items that offer meaningful correctness or workflow val
 | 16 | Correct Audit Archive layout recognition | Medium | Small |
 | 21 | Read XMP RDF attribute-form dates | Medium | Small |
 | 22 | Run OCR only when stronger evidence is inadequate | Medium | Small |
-| 29 | Detect nested ChronoVault archives in source scans | Medium | Small |
 | 35 | Make generated fixtures deterministic and safely cleanable | Medium | Small |
 | 36 | Repair the contained manual test workflow | Medium | Tiny |
 

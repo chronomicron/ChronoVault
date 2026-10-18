@@ -344,7 +344,9 @@ def init_archive_table(conn):
     conn.commit()
 
 
-def find_files_and_archives(root_path, media_extensions, archive_extensions):
+def find_files_and_archives(
+    root_path, media_extensions, archive_extensions, skip_nested_archives=True
+):
     """
     Walk root_path ONCE, sorting every file into either matching_files
     (matches the media extensions being searched for) or archive_files
@@ -355,7 +357,8 @@ def find_files_and_archives(root_path, media_extensions, archive_extensions):
     an old hard drive, potentially a large one, so walking it twice would
     double a cost that's already significant.
 
-    Returns (matching_files, archive_files, interrupted, interruption_reason).
+    Returns (matching_files, archive_files, interrupted, interruption_reason,
+    skipped_archive_roots).
     interrupted is True if the walk didn't finish (an I/O error partway
     through -- a disconnected drive, a failing sector, permissions
     changing mid-scan). Whatever was found BEFORE the interruption is
@@ -382,15 +385,39 @@ def find_files_and_archives(root_path, media_extensions, archive_extensions):
         print(f"Error: '{root_path}' is not a directory.")
         sys.exit(1)
 
+    skipped_archive_roots = []
+
+    def raise_walk_error(error):
+        raise error
+
     try:
-        for file_path in root.rglob('*'):
-            if not file_path.is_file():
+        root_absolute = os.path.abspath(root)
+        for current_root, child_directories, filenames in os.walk(
+            root, topdown=True, onerror=raise_walk_error
+        ):
+            current_path = Path(current_root)
+
+            # The selected root itself is handled by the existing guard and
+            # its explicit --allow-archive-source override. For a nested root,
+            # prune before visiting any descendants or indexing its own files.
+            if (
+                skip_nested_archives
+                and os.path.abspath(current_root) != root_absolute
+                and 'archive_database.db' in filenames
+            ):
+                skipped_archive_roots.append(current_path)
+                child_directories[:] = []
                 continue
-            if matches_any_extension(file_path, archive_ext_set):
-                archive_files.append(file_path)
-                continue
-            if matches_any_extension(file_path, media_ext_set):
-                matching_files.append(file_path)
+
+            for filename in filenames:
+                file_path = current_path / filename
+                if not file_path.is_file():
+                    continue
+                if matches_any_extension(file_path, archive_ext_set):
+                    archive_files.append(file_path)
+                    continue
+                if matches_any_extension(file_path, media_ext_set):
+                    matching_files.append(file_path)
     except OSError as e:
         # Broadened from PermissionError -- a disconnected drive, a
         # failing sector, or a network share dropping mid-scan typically
@@ -406,7 +433,7 @@ def find_files_and_archives(root_path, media_extensions, archive_extensions):
         print("are still saved -- re-run Indexer over the same path once the issue is")
         print("resolved; already-found files won't be re-inserted.")
 
-    return matching_files, archive_files, interrupted, interruption_reason
+    return matching_files, archive_files, interrupted, interruption_reason, skipped_archive_roots
 
 
 COMMIT_BATCH_SIZE = 100
@@ -712,7 +739,8 @@ def main():
     # Checked before ANYTHING else -- before even opening located_files.db --
     # so a mistaken invocation doesn't touch the database at all, not just
     # exit cleanly partway through.
-    if looks_like_chronovault_archive(root_path) and not allow_archive_source:
+    source_root_is_archive = looks_like_chronovault_archive(root_path)
+    if source_root_is_archive and not allow_archive_source:
         print(f"Error: '{root_path}' looks like it might already be a ChronoVault archive")
         print(f"(it contains 'archive_database.db', which only Importer ever creates).")
         print()
@@ -747,11 +775,24 @@ def main():
     conn = init_database(database_path)
     init_archive_table(conn)
 
-    files, archive_files, interrupted, interruption_reason = find_files_and_archives(
-        root_path, extensions, archive_extensions
+    (
+        files,
+        archive_files,
+        interrupted,
+        interruption_reason,
+        skipped_archive_roots,
+    ) = find_files_and_archives(
+        root_path,
+        extensions,
+        archive_extensions,
+        skip_nested_archives=not (source_root_is_archive and allow_archive_source),
     )
     print(f"Found {len(files)} matching media file(s) on disk.")
     print(f"Found {len(archive_files)} archive file(s) on disk.")
+    if skipped_archive_roots:
+        print(f"Skipped {len(skipped_archive_roots)} nested ChronoVault archive root(s):")
+        for archive_root in skipped_archive_roots:
+            print(f"  {archive_root}")
 
     inserted, skipped = store_files(conn, files)
 
