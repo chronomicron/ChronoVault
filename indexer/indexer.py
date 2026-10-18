@@ -37,6 +37,7 @@ Usage (from the ChronoVault/ project root):
 import json
 import sys
 import sqlite3
+import os
 from pathlib import Path
 from datetime import datetime
 
@@ -62,7 +63,7 @@ MAX_LISTED_MATCHES = 500
 
 
 def load_config(config_file):
-    """Load indexer configuration, including the archive-detection options (both optional, both default off/small)."""
+    """Load and validate indexer configuration before touching its database."""
     try:
         with open(config_file, 'r') as f:
             config = json.load(f)
@@ -73,18 +74,189 @@ def load_config(config_file):
         print(f"Error: Configuration file '{config_file}' is not valid JSON.")
         sys.exit(1)
 
+    if not isinstance(config, dict):
+        print("Error: Configuration must be a JSON object.")
+        sys.exit(1)
+
     database_path = config.get('database_path')
     extensions = config.get('extensions', [])
-    if not database_path:
-        print("Error: 'database_path' not specified in configuration file.")
+    archive_extensions = config.get('archive_extensions', ['zip', 'tar', 'tar.gz', 'tgz', 'iso'])
+    look_inside_archives = config.get('look_inside_archives', False)
+
+    if not isinstance(database_path, str) or not database_path.strip():
+        print("Error: 'database_path' must be a non-empty path in the configuration file.")
+        sys.exit(1)
+    if not isinstance(extensions, list) or not extensions or not all(
+        isinstance(ext, str) and ext.strip() for ext in extensions
+    ):
+        print("Error: 'extensions' must be a non-empty list of extension strings.")
+        sys.exit(1)
+    if not isinstance(archive_extensions, list) or not all(
+        isinstance(ext, str) and ext.strip() for ext in archive_extensions
+    ):
+        print("Error: 'archive_extensions' must be a list of extension strings.")
+        sys.exit(1)
+    if not isinstance(look_inside_archives, bool):
+        print("Error: 'look_inside_archives' must be true or false.")
         sys.exit(1)
 
     return {
-        'database_path': database_path,
-        'extensions': extensions,
-        'archive_extensions': config.get('archive_extensions', ['zip', 'tar', 'tar.gz', 'tgz', 'iso']),
-        'look_inside_archives': config.get('look_inside_archives', False),
+        'database_path': database_path.strip(),
+        'extensions': [ext.strip() for ext in extensions],
+        'archive_extensions': [ext.strip() for ext in archive_extensions],
+        'look_inside_archives': look_inside_archives,
     }
+
+
+def validate_source_root(root_path):
+    """Fail before database access unless root_path is an existing directory."""
+    root = Path(root_path)
+    if not root.exists():
+        print(f"Error: Path '{root_path}' does not exist.")
+        sys.exit(1)
+    if not root.is_dir():
+        print(f"Error: '{root_path}' is not a directory.")
+        sys.exit(1)
+
+
+LOCATED_FILES_REQUIRED_COLUMNS = {
+    'id', 'file_path', 'file_extension', 'file_size',
+    'creation_date', 'modification_date', 'status',
+}
+LOCATED_FILES_COLUMN_TYPES = {
+    'id': 'INTEGER',
+    'file_path': 'TEXT',
+    'file_extension': 'TEXT',
+    'file_size': 'INTEGER',
+    'creation_date': 'TEXT',
+    'modification_date': 'TEXT',
+    'status': 'TEXT',
+}
+LOCATED_ARCHIVES_REQUIRED_COLUMNS = {
+    'id', 'archive_path', 'archive_type', 'archive_size', 'contents_listed',
+    'matching_file_count', 'matching_files', 'note',
+}
+LOCATED_ARCHIVES_COLUMN_TYPES = {
+    'id': 'INTEGER',
+    'archive_path': 'TEXT',
+    'archive_type': 'TEXT',
+    'archive_size': 'INTEGER',
+    'contents_listed': 'INTEGER',
+    'matching_file_count': 'INTEGER',
+    'matching_files': 'TEXT',
+    'note': 'TEXT',
+}
+
+
+def _table_columns(cursor, table_name):
+    cursor.execute("SELECT type FROM sqlite_master WHERE name = ?", (table_name,))
+    table = cursor.fetchone()
+    if table is None:
+        return None, None
+    if table[0] != 'table':
+        return table[0], set()
+    cursor.execute(f'PRAGMA table_info("{table_name}")')
+    return table[0], {row[1]: row for row in cursor.fetchall()}
+
+
+def _has_unique_column(cursor, table_name, column_name):
+    cursor.execute(f'PRAGMA index_list("{table_name}")')
+    for index in cursor.fetchall():
+        if not index[2]:
+            continue
+        cursor.execute(f'PRAGMA index_info("{index[1]}")')
+        if [row[2] for row in cursor.fetchall()] == [column_name]:
+            return True
+    return False
+
+
+def _validate_inventory_schema(conn):
+    """Reject an existing SQLite file that is not a compatible source inventory."""
+    cursor = conn.cursor()
+    files_type, files_columns = _table_columns(cursor, 'located_files')
+    if files_type != 'table':
+        cursor.execute("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        names = [row[0] for row in cursor.fetchall()]
+        if 'archive_files' in names:
+            kind = "appears to be a ChronoVault archive database"
+        elif names:
+            kind = "contains tables but no ChronoVault 'located_files' inventory table"
+        else:
+            kind = "is an empty SQLite database with no ChronoVault inventory table"
+        raise ValueError(f"database {kind}; refusing to modify it")
+
+    missing = sorted(LOCATED_FILES_REQUIRED_COLUMNS - set(files_columns))
+    if missing:
+        raise ValueError(
+            "database has an incompatible 'located_files' table; missing required "
+            f"column(s): {', '.join(missing)}"
+        )
+    wrong_types = sorted(
+        name for name, expected in LOCATED_FILES_COLUMN_TYPES.items()
+        if files_columns[name][2].upper() != expected
+    )
+    if wrong_types or files_columns['id'][5] != 1 or not files_columns['file_path'][3]:
+        details = ', '.join(wrong_types) if wrong_types else 'id/file_path constraints'
+        raise ValueError(
+            "database has an incompatible 'located_files' table; unexpected type or "
+            f"constraint for: {details}"
+        )
+    if not _has_unique_column(cursor, 'located_files', 'file_path'):
+        raise ValueError(
+            "database has an incompatible 'located_files' table; 'file_path' must be unique"
+        )
+
+    archives_type, archives_columns = _table_columns(cursor, 'located_archives')
+    if archives_type is not None:
+        missing = sorted(LOCATED_ARCHIVES_REQUIRED_COLUMNS - set(archives_columns))
+        if archives_type != 'table' or missing:
+            detail = f"; missing column(s): {', '.join(missing)}" if missing else ''
+            raise ValueError(
+                "database has an incompatible 'located_archives' table" + detail
+            )
+        wrong_types = sorted(
+            name for name, expected in LOCATED_ARCHIVES_COLUMN_TYPES.items()
+            if archives_columns[name][2].upper() != expected
+        )
+        if wrong_types or archives_columns['id'][5] != 1 or not archives_columns['archive_path'][3]:
+            details = ', '.join(wrong_types) if wrong_types else 'id/archive_path constraints'
+            raise ValueError(
+                "database has an incompatible 'located_archives' table; unexpected type or "
+                f"constraint for: {details}"
+            )
+        if not _has_unique_column(cursor, 'located_archives', 'archive_path'):
+            raise ValueError(
+                "database has an incompatible 'located_archives' table; 'archive_path' must be unique"
+            )
+
+
+def validate_database_path(database_path):
+    """Check a target path without creating or changing its database."""
+    db_path = Path(database_path)
+    parent = db_path.parent
+    if not parent.exists() or not parent.is_dir():
+        print(f"Error: Database directory '{parent}' does not exist or is not a directory.")
+        sys.exit(1)
+
+    if not db_path.exists():
+        if not os.access(parent, os.W_OK):
+            print(f"Error: Database directory '{parent}' is not writable.")
+            sys.exit(1)
+        return
+    if not db_path.is_file():
+        print(f"Error: Database path '{database_path}' is not a regular file.")
+        sys.exit(1)
+
+    try:
+        # mode=ro prevents SQLite from creating or changing a file during preflight.
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            _validate_inventory_schema(conn)
+        finally:
+            conn.close()
+    except (sqlite3.Error, ValueError) as exc:
+        print(f"Error: Existing database '{database_path}' is not a compatible ChronoVault inventory: {exc}.")
+        sys.exit(1)
 
 
 def normalize_extensions(extensions):
@@ -559,9 +731,11 @@ def main():
     archive_extensions = config['archive_extensions']
     look_inside_archives = config['look_inside_archives']
 
-    if not extensions:
-        print("Error: No extensions specified in configuration file.")
-        sys.exit(1)
+    # Complete all path/schema checks before opening SQLite in write mode.
+    # A missing database is a valid first-run case; an existing file must
+    # already be a compatible ChronoVault source inventory.
+    validate_source_root(root_path)
+    validate_database_path(database_path)
 
     print(f"Database path: {database_path}")
     print(f"Looking for file extensions: {extensions}")
@@ -623,4 +797,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    

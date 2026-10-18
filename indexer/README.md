@@ -67,6 +67,14 @@ python3 indexer/indexer.py indexer/config.json ~/Pictures
 
 This searches everything under `~/Pictures`, recursively, and logs any matching files into the database specified in `config.json`.
 
+## Startup Preflight Checks
+
+Before opening the inventory database for writing, Indexer validates the configuration, confirms the search path exists and is a directory, and checks the database target. `database_path` must be a non-empty path, `extensions` must be a non-empty list of extension strings, `archive_extensions` must be a list of extension strings when provided, and `look_inside_archives` must be a boolean. The database's parent directory must already exist.
+
+On a first run, a database file that does not yet exist is allowed and Indexer creates it after these checks pass. An existing database is inspected read-only first. It must contain a compatible `located_files` table with the Indexer base columns and a unique `file_path`; if `located_archives` already exists, it must have the expected Indexer columns and unique `archive_path`. Extra columns added by Classify Media, Condition Database, and other ChronoVault tools are allowed. An absent `located_archives` table is created as before. Empty SQLite files, archive databases, unrelated databases, and incompatible Indexer schemas are rejected before Indexer changes them.
+
+These checks run in the Indexer CLI logic, so GUI launches that invoke Indexer receive the same validation. The existing `archive_database.db` source-root guard still runs and still requires `--allow-archive-source` to override.
+
 ## Safety Check: Refusing to Index an Existing Archive
 
 Before doing anything else — before even opening `located_files.db` — Indexer checks whether the search path itself directly contains `archive_database.db`, the file only Importer ever creates, always at the root of whatever archive it built. If found, Indexer refuses to proceed:
