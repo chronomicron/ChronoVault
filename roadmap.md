@@ -36,6 +36,7 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 ### User interface and diagnostics
 
 - The PySide6 GUI launches the pipeline and supporting tools, streams output, synchronizes configured paths for mapped tools, records activity, and generates a diagnostic report.
+- At startup, the GUI shows a friendly non-blocking reminder with separate Source and Archive folder selectors when either saved path is unset or unavailable. It checks folder access without requiring the pipeline databases to exist.
 - Archive-source and ambiguous destination checks guard common path-selection mistakes.
 - The interface remains a launcher/orchestration layer. It does not yet provide a thumbnail browser, date/label filtering, candidate review, duplicate resolution, or audit repair.
 - Running tools can be stopped by terminating their process. Graceful cancellation and cleanup of an in-progress copy are not implemented.
@@ -89,10 +90,19 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 ### GUI, configuration, and portability
 
 - GUI path synchronization only affects tools mapped to a config entry. Each tool still owns its path configuration, so drift is possible outside the GUI.
-- Bootstrap saves Source and Archive paths in `gui_settings.ini`, but those values do not yet configure every tool's database and report paths. The GUI still updates those paths through its Test folder workflow, and the initializer currently exits without launching the GUI. First-run path guidance and consistent per-action synchronization remain to be implemented.
+- Bootstrap saves Source and Archive paths in `gui_settings.ini`, but those values do not yet configure every tool's database and report paths. The GUI still updates those paths through its Test folder workflow, and the initializer currently exits without launching the GUI. Consistent per-action synchronization remains to be implemented.
+- The Linux default inventory database location has been selected as `~/.local/share/chronovault/located_files.db`, but implementation and handling of `XDG_DATA_HOME` are still pending. macOS and Windows locations remain undecided.
 - Some scripts and manual tests assume particular working directories or fixture layouts.
 - The GUI's executable probe is fixed and its subprocess stop action is abrupt.
 - Optional dependencies and external executables are reported by environment checks, but installation is manual. There is no usable first-run bootstrap for preparing a new user's workspace and configurations yet.
+
+### Planned configuration contract
+
+The GUI will own one user-specific central runtime JSON for its tool settings. Its `tools` object is keyed by stable tool IDs, and each tool section uses exactly the same field names and value types as that tool's standalone JSON. A GUI launch passes the central file path; the tool selects its own section. A standalone launch passes that tool's private JSON path, or uses the existing module config by default; the tool reads the same fields from the file's top level. This keeps the tool's configuration shape consistent across both launch modes.
+
+The GUI updates the relevant path fields in its own central config when the user changes Source, Archive, or inventory database locations, then passes the central config path to the selected tool. Tools read configuration and do not rewrite the GUI's central file. The checked-in `gui/gui_config.json` remains a static script/location map and is separate from the user-owned runtime settings. This design is accepted but not implemented; current GUI code still updates module config files.
+
+Migration should add one shared config loader and validation contract, preserve existing standalone CLI behavior, migrate each tool and its README in small steps, then switch the GUI to central-config writes and per-tool config-path launches. Test each tool in both central-config and standalone-config modes before removing any legacy behavior. Define CLI override precedence and required keys before implementation.
 
 ### Tests and generated data
 
@@ -122,6 +132,7 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 ### Priority 3: stabilize paths, migrations, and repeat runs
 
 - Adopt consistent path resolution independent of the launch directory, while preserving portable relative configurations where intentional.
+- Replace GUI writes to module config files with the accepted central runtime JSON contract and a shared loader; preserve standalone per-tool config use.
 - Introduce schema versioning and ordered migrations for both SQLite databases.
 - Refresh mutable metadata for previously indexed paths and clarify incremental-run summaries.
 - Finish ISO success-path verification; decide whether RAR/7z listing is worth its external dependencies.
@@ -145,7 +156,7 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 ### Priority 6: prepare first-run setup
 
 - Decide supported Python versions, dependency groups, and behavior when the runtime is missing.
-- Complete the Linux/macOS initializer flow by launching the GUI after successful path setup, adding friendly GUI guidance when paths are missing or unavailable, and synchronizing current GUI paths with the relevant tool configurations before each action. Choose the default inventory database location.
+- Complete the Linux/macOS initializer flow by launching the GUI after successful path setup and connecting it to the central runtime config. Implement the Linux inventory database default (`~/.local/share/chronovault/located_files.db`); decide and implement the corresponding macOS and Windows locations.
 - Implement the Windows launcher and consolidate environment checks with the standalone `test_env.py` diagnostic.
 - Keep GUI-managed configs separate from the standalone module configs; do not install dependencies or overwrite user settings without explicit action.
 

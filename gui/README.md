@@ -56,6 +56,22 @@ sudo apt install libxcb-cursor0
 
 All nine subprocess-launching buttons (everything except Generate Report) disable together while any one is running — not a minor UI nicety, this is what prevents two tools ever writing to the same database at once. Generate Report is the one deliberate exception: it runs synchronously in plain Python, never touches the shared subprocess slot, and is meant to work even while another tool is mid-run.
 
+## Startup Folder Guidance
+
+On startup, the GUI checks whether the saved Source and Archive folders are
+available. If either path is missing, is not a folder, or cannot be accessed
+for its purpose, an inline reminder appears below the path fields. It explains
+that Source is the drive or folder ChronoVault scans and Archive is where
+imported files are stored. Separate **Choose Source Folder…** and **Choose
+Archive Folder…** buttons open the folder picker only for paths that need
+attention. The reminder does not block the rest of the GUI, and a valid saved
+path is left intact when only the other path needs replacing.
+
+Folder selections and manually edited Source/Archive values are saved
+immediately in `gui/gui_settings.ini`. The startup check validates folder
+access only; it does not require `located_files.db` or `archive_database.db` to
+exist. Indexer and Importer create those databases when their work begins.
+
 ## Test Workspace and Path Synchronization
 
 Choose **Test folder** first to establish one self-contained workspace:

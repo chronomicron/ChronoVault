@@ -38,7 +38,7 @@ The largest cluster of risks comes from one underlying architectural fact: Chron
 | 28 | Add safely staged archive-member extraction | Missing functionality | Medium | Large | 11–13, 27 |
 | 29 | Detect nested ChronoVault archives in source scans | Completed | — | Done | None |
 | 30 | Add controlled GUI cancellation | UX / Reliability | Medium | Medium | 1, 2, 4, 26 |
-| 31 | Introduce a unified per-run path/configuration context | Architecture / UX | High | Medium | 12, 14 |
+| 31 | Unify GUI and standalone tool configuration loading | Architecture / UX | High | Large | 12, 14 |
 | 32 | Add GUI review, duplicate, and repair workflows | Feature / UX | Medium | Very large | 11, 18, 31 |
 | 33 | Build automated unit and migration tests | Testing | High | Medium | Can begin immediately |
 | 34 | Build isolated failure-injection integration tests | Testing | High | Large | Design alongside 1–7 |
@@ -259,12 +259,13 @@ The largest cluster of risks comes from one underlying architectural fact: Chron
 - **Dependencies / sequencing:** Add only after the affected tools define safe interruption and restart behavior.
 - **Evidence/status:** Confirmed missing capability. The roadmap wording implying an existing abrupt stop action is inaccurate.
 
-### 31. Introduce a unified per-run path/configuration context
+### 31. Unify GUI and standalone tool configuration loading
 
-- **Why it matters:** The GUI synchronizes `archive_root` for selected tools but does not synchronize source database paths. Selecting a source folder affects only Indexer; Classify Media and Condition Database may silently use another configured database.
-- **Likely scope:** GUI, CLI arguments/config loading, diagnostics, run profiles.
-- **Dependencies / sequencing:** Build on canonical path semantics and preflight checks.
-- **Evidence/status:** Confirmed architectural limitation; partly tracked as configuration drift.
+- **Why it matters:** The GUI currently edits several module `config.json` files to synchronize database and archive paths. Tool configs can drift, and standalone CLI configuration follows a separate path. One user-owned GUI runtime config should be the GUI's source of truth while each tool remains runnable with its own private config.
+- **Accepted configuration contract:** A user-owned central JSON contains a `tools` object keyed by stable tool IDs (for example, `indexer` and `condition_database`). Each tool's nested object uses the same field names and value types as that tool's standalone JSON. When launched by the GUI, the tool receives the central config path and reads its own section. When launched standalone, it receives its private config path—or defaults to its existing module config—and reads the same fields from the top level. Shared path values are written to all relevant tool sections using each tool's existing field names. The checked-in `gui/gui_config.json` remains the static script/location map; the user-owned runtime config is a separate file.
+- **Likely scope:** Shared config loading/validation helper; consistent CLI config-path argument handling; every tool's config loader and README; GUI runtime config creation/editing and per-action path synchronization; diagnostics and first-run setup. Keep standalone configs usable and do not write GUI settings into module config files.
+- **Dependencies / sequencing:** Build on canonical path semantics and preflight checks. Define the required fields and behavior for values supplied by both central config and CLI overrides before migrating tools. Migrate one tool at a time with compatibility checks.
+- **Evidence/status:** Architecture accepted and documented; implementation not started. Current GUI behavior still edits module config files for Test-folder database/report paths and selected per-action archive paths. The GUI currently stores Source/Archive selections separately in `gui_settings.ini`.
 
 ### 32. Add GUI review, duplicate, and repair workflows
 
@@ -313,7 +314,7 @@ The largest cluster of risks comes from one underlying architectural fact: Chron
 - **Why it matters:** A new user currently has to install and check Python dependencies, choose workspace paths, create folders, and edit several tool-specific configuration files manually. The existing `test_env.py` diagnostic itself requires Python, so a native launcher must handle the missing-runtime case first.
 - **Likely scope:** `bootstrap/bootstrap.sh`, a Windows launcher, a Python initializer with dependency and GUI-startup checks, OS-specific missing-Python guidance, path validation, and GUI-managed per-tool configs. Keep standalone CLI configs usable and do not install dependencies automatically.
 - **Dependencies / sequencing:** Decide supported Python versions and dependencies with item 37; coordinate generated config and path ownership with item 31.
-- **Evidence/status:** The Linux/macOS shell launcher checks for Python 3.8+ and starts the initializer. The initializer checks current required/optional dependencies, performs an offscreen Qt/main-window startup check, accepts or prompts for source/archive paths, checks source readability, creates and write-checks the archive folder, and saves both paths in `gui/gui_settings.ini`. It does not install packages or create databases. Still needed: launch the GUI after setup, add friendly GUI guidance when paths are missing or unavailable, synchronize current GUI paths with each tool's database/report config at launch, settle the default inventory DB location, consolidate checks with `test_env.py`, and implement the Windows launcher. The GUI currently updates database/report paths through its Test folder workflow.
+- **Evidence/status:** The Linux/macOS shell launcher checks for Python 3.8+ and starts the initializer. The initializer checks current required/optional dependencies, performs an offscreen Qt/main-window startup check, accepts or prompts for source/archive paths, checks source readability, creates and write-checks the archive folder, and saves both paths in `gui/gui_settings.ini`. The GUI now shows a friendly non-blocking startup reminder when either saved folder is unset or inaccessible, with separate folder selectors; database files are not required at startup. Neither component installs packages or creates databases. Linux's proposed inventory DB default is `~/.local/share/chronovault/located_files.db`; macOS and Windows locations remain undecided, and no platform-specific resolution is implemented. Still needed: launch the GUI after successful setup, implement the central runtime config and shared tool loader described in item 31, choose the GUI-owned config location, implement database-location resolution, consolidate checks with `test_env.py`, and implement the Windows launcher. The GUI currently updates database/report paths through its Test folder workflow.
 
 ## Quick wins
 

@@ -26,6 +26,8 @@ Usage:
 
 import sys
 import json
+import os
+import tempfile
 from pathlib import Path
 
 try:
@@ -101,6 +103,7 @@ class ChronoVaultWindow(QMainWindow):
         source_row.addWidget(QLabel("Source folder:"))
         self.source_field = QLineEdit()
         self.source_field.setPlaceholderText("Folder to search and index (e.g. an old drive, USB key, phone backup)")
+        self.source_field.editingFinished.connect(self._save_path_fields)
         source_row.addWidget(self.source_field)
         source_browse = QPushButton("Browse…")
         source_browse.clicked.connect(self._browse_source)
@@ -112,11 +115,32 @@ class ChronoVaultWindow(QMainWindow):
         archive_row.addWidget(QLabel("Archive folder:"))
         self.archive_field = QLineEdit()
         self.archive_field.setPlaceholderText("Where ChronoVault builds the dated archive")
+        self.archive_field.editingFinished.connect(self._save_path_fields)
         archive_row.addWidget(self.archive_field)
         archive_browse = QPushButton("Browse…")
         archive_browse.clicked.connect(self._browse_archive)
         archive_row.addWidget(archive_browse)
         layout.addLayout(archive_row)
+
+        # Keep first-run guidance inside the window rather than interrupting
+        # startup with a modal dialog. Each chooser appears only for a path
+        # that is missing or cannot currently be used.
+        self.path_guidance = QFrame()
+        self.path_guidance.setFrameShape(QFrame.Shape.StyledPanel)
+        guidance_layout = QVBoxLayout(self.path_guidance)
+        self.path_guidance_label = QLabel()
+        self.path_guidance_label.setWordWrap(True)
+        guidance_layout.addWidget(self.path_guidance_label)
+        guidance_buttons = QHBoxLayout()
+        self.guidance_source_button = QPushButton("Choose Source Folder…")
+        self.guidance_source_button.clicked.connect(self._browse_source)
+        guidance_buttons.addWidget(self.guidance_source_button)
+        self.guidance_archive_button = QPushButton("Choose Archive Folder…")
+        self.guidance_archive_button.clicked.connect(self._browse_archive)
+        guidance_buttons.addWidget(self.guidance_archive_button)
+        guidance_buttons.addStretch(1)
+        guidance_layout.addLayout(guidance_buttons)
+        layout.addWidget(self.path_guidance)
 
         # --- Action buttons ---
         action_row = QHBoxLayout()
@@ -223,12 +247,69 @@ class ChronoVaultWindow(QMainWindow):
         self.test_folder_field.setText(self.settings['paths'].get('test_folder', ''))
         self.source_field.setText(self.settings['paths'].get('source_folder', ''))
         self.archive_field.setText(self.settings['paths'].get('archive_folder', ''))
+        self._update_path_guidance()
 
     def _save_settings(self):
         self.settings['paths']['test_folder'] = self.test_folder_field.text()
         self.settings['paths']['source_folder'] = self.source_field.text()
         self.settings['paths']['archive_folder'] = self.archive_field.text()
         save_settings(self.settings)
+
+    def _save_path_fields(self):
+        """Persist manually edited Source/Archive values."""
+        self._save_settings()
+        self._update_path_guidance()
+
+    @staticmethod
+    def _folder_problem(value, purpose):
+        """Return a short explanation when a selected working folder is unavailable."""
+        value = value.strip()
+        if not value:
+            return "not selected"
+
+        folder = Path(value).expanduser()
+        if not folder.exists():
+            return "not available at this path"
+        if not folder.is_dir():
+            return "the path is not a folder"
+
+        try:
+            if purpose == "source":
+                with os.scandir(folder) as entries:
+                    next(entries, None)
+            else:
+                # A uniquely named temporary file checks the actual write
+                # path and avoids touching any existing user files.
+                with tempfile.NamedTemporaryFile(
+                    prefix=".chronovault_path_check_", dir=folder, delete=True
+                ):
+                    pass
+        except OSError as exc:
+            action = "read" if purpose == "source" else "write to"
+            return f"ChronoVault cannot {action} this folder ({exc})"
+        return None
+
+    def _update_path_guidance(self):
+        source_problem = self._folder_problem(self.source_field.text(), "source")
+        archive_problem = self._folder_problem(self.archive_field.text(), "archive")
+        self.guidance_source_button.setVisible(source_problem is not None)
+        self.guidance_archive_button.setVisible(archive_problem is not None)
+
+        if source_problem is None and archive_problem is None:
+            self.path_guidance.hide()
+            return
+
+        details = []
+        if source_problem is not None:
+            details.append(f"Source: {source_problem}.")
+        if archive_problem is not None:
+            details.append(f"Archive: {archive_problem}.")
+        self.path_guidance_label.setText(
+            "Choose or reconnect the folders ChronoVault needs. Source is the "
+            "drive or folder ChronoVault scans; Archive is where imported files "
+            "are stored. " + " ".join(details)
+        )
+        self.path_guidance.show()
 
     def _log(self, description):
         """
@@ -281,18 +362,21 @@ class ChronoVaultWindow(QMainWindow):
         self.source_field.setText(paths['source_folder'])
         self.archive_field.setText(paths['archive_folder'])
         self._save_settings()
+        self._update_path_guidance()
         self._log(f"Test folder set and dependent paths reset: {paths['test_folder']}")
 
     def _browse_source(self):
         folder = QFileDialog.getExistingDirectory(self, "Select source folder to search")
         if folder:
             self.source_field.setText(folder)
+            self._save_path_fields()
             self._log(f"Source folder set to: {folder}")
 
     def _browse_archive(self):
         folder = QFileDialog.getExistingDirectory(self, "Select archive folder")
         if folder:
             self.archive_field.setText(folder)
+            self._save_path_fields()
             self._log(f"Archive folder set to: {folder}")
 
     def _set_running_state(self, running, tool_name=""):
