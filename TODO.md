@@ -311,9 +311,9 @@ The largest cluster of risks comes from one underlying architectural fact: Chron
 ### 38. Add a cross-platform first-run bootstrap and setup flow
 
 - **Why it matters:** A new user currently has to install and check Python dependencies, choose workspace paths, create folders, and edit several tool-specific configuration files manually. The existing `test_env.py` diagnostic itself requires Python, so a native launcher must handle the missing-runtime case first.
-- **Likely scope:** `bootstrap/bootstrap.sh`, a Windows launcher, a Python initializer with shared environment checks (reusing `test_env.py` logic), OS-specific missing-Python guidance, workspace creation, and GUI-managed per-tool configs.
+- **Likely scope:** `bootstrap/bootstrap.sh`, a Windows launcher, a Python initializer with dependency and GUI-startup checks, OS-specific missing-Python guidance, path validation, and GUI-managed per-tool configs. Keep standalone CLI configs usable and do not install dependencies automatically.
 - **Dependencies / sequencing:** Decide supported Python versions and dependencies with item 37; coordinate generated config and path ownership with item 31.
-- **Evidence/status:** The Linux/macOS shell launcher checks for Python 3.8+ and starts the adjacent initializer, with OS-specific guidance if no supported runtime is found. The Windows launcher and Python initializer remain placeholders; dependency checks, workspace creation, and configuration generation are not implemented yet.
+- **Evidence/status:** The Linux/macOS shell launcher checks for Python 3.8+ and starts the initializer. The initializer checks current required/optional dependencies, performs an offscreen Qt/main-window startup check, accepts or prompts for source/archive paths, checks source readability, creates and write-checks the archive folder, and saves both paths in `gui/gui_settings.ini`. It does not install packages or create databases. Still needed: launch the GUI after setup, add friendly GUI guidance when paths are missing or unavailable, synchronize current GUI paths with each tool's database/report config at launch, settle the default inventory DB location, consolidate checks with `test_env.py`, and implement the Windows launcher. The GUI currently updates database/report paths through its Test folder workflow.
 
 ## Quick wins
 

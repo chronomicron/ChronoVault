@@ -39,7 +39,7 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 - Archive-source and ambiguous destination checks guard common path-selection mistakes.
 - The interface remains a launcher/orchestration layer. It does not yet provide a thumbnail browser, date/label filtering, candidate review, duplicate resolution, or audit repair.
 - Running tools can be stopped by terminating their process. Graceful cancellation and cleanup of an in-progress copy are not implemented.
-- `bootstrap/` contains a Linux/macOS shell launcher that checks for Python 3.8+ and starts the adjacent initializer, with OS-specific guidance if no supported runtime is found. The Windows launcher and Python initializer remain placeholders; dependency checks, workspace creation, and configuration generation are not implemented yet.
+- `bootstrap/` has a Linux/macOS shell launcher and Python initializer. The launcher checks for Python 3.8+ and gives OS-specific guidance if no supported runtime is found. The initializer checks dependencies and offscreen Qt/main-window startup, validates the chosen source and archive folders, creates and write-checks the archive destination, and saves the paths in the GUI's personal settings. It does not install dependencies, create databases, or launch the GUI. The Windows launcher remains a placeholder.
 
 ### Test support
 
@@ -89,6 +89,7 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 ### GUI, configuration, and portability
 
 - GUI path synchronization only affects tools mapped to a config entry. Each tool still owns its path configuration, so drift is possible outside the GUI.
+- Bootstrap saves Source and Archive paths in `gui_settings.ini`, but those values do not yet configure every tool's database and report paths. The GUI still updates those paths through its Test folder workflow, and the initializer currently exits without launching the GUI. First-run path guidance and consistent per-action synchronization remain to be implemented.
 - Some scripts and manual tests assume particular working directories or fixture layouts.
 - The GUI's executable probe is fixed and its subprocess stop action is abrupt.
 - Optional dependencies and external executables are reported by environment checks, but installation is manual. There is no usable first-run bootstrap for preparing a new user's workspace and configurations yet.
@@ -144,7 +145,8 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 ### Priority 6: prepare first-run setup
 
 - Decide supported Python versions, dependency groups, and behavior when the runtime is missing.
-- Implement the Linux/macOS shell launcher, Windows launcher, and Python initializer for environment checks, workspace creation, and GUI-managed per-tool configurations.
+- Complete the Linux/macOS initializer flow by launching the GUI after successful path setup, adding friendly GUI guidance when paths are missing or unavailable, and synchronizing current GUI paths with the relevant tool configurations before each action. Choose the default inventory database location.
+- Implement the Windows launcher and consolidate environment checks with the standalone `test_env.py` diagnostic.
 - Keep GUI-managed configs separate from the standalone module configs; do not install dependencies or overwrite user settings without explicit action.
 
 ## Candidate review and archive extraction

@@ -61,6 +61,8 @@ The databases are related by convention rather than foreign keys, and schema add
 
 ChronoVault is currently a developer-oriented repository rather than an installed Python package. There is no `requirements.txt`, `pyproject.toml`, installer, or container definition. Run commands from the repository root because many configured paths are resolved from the process working directory.
 
+The Linux/macOS bootstrap provides partial first-run setup: it checks Python and current dependencies, validates source/archive paths, and saves them for the GUI. It does not install packages, configure every tool's database path, or launch the GUI yet. See [bootstrap/README.md](bootstrap/README.md) for current behavior and remaining setup work.
+
 ### Requirements
 
 - Python 3.8 or newer

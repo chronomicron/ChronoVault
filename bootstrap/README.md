@@ -1,58 +1,83 @@
 # ChronoVault Bootstrap
 
-This directory will hold the first-run setup launchers and their Python setup
-program. The intended entry points are:
+The bootstrap folder contains the first-run launchers and the Python initializer.
+The launcher finds a usable Python interpreter; `initialize.py` checks Python
+dependencies and validates the source and archive folders before the user runs
+the pipeline.
 
-- `bootstrap.sh` for Linux and macOS
-- `bootstrap.bat` as a future Windows launcher
-- `initialize.py` for dependency checks, workspace folder creation, and
-  GUI-managed per-tool configuration setup
+## Linux and macOS
 
-## Current status
+From the project root, run:
 
-`bootstrap.sh` checks for Python 3.8 or newer and launches the adjacent
-`initialize.py`, forwarding any command-line arguments. If Python is missing,
-too old, or cannot be run, it explains the problem, gives OS-specific starting
-steps, and stops. It does not install Python or check Python package
-dependencies.
+```bash
+./bootstrap/bootstrap.sh
+```
 
-`bootstrap.bat` and `initialize.py` remain placeholders. The initializer
-currently reports that setup is not implemented; it does not inspect package
-dependencies, create directories, or write configuration files.
+The script checks for Python 3.8 or newer, then starts `initialize.py`. If
+Python is missing, too old, or cannot run, it prints next steps and stops. It
+does not install Python or any other software.
 
-The eventual platform launchers should first locate a supported Python
-interpreter without depending on Python themselves. Linux/macOS use the shell
-launcher; Windows uses its native launcher. If no supported interpreter is
-available, the launcher should identify the operating system as well as it
-can, show appropriate Python installation instructions, and stop without
-trying to run Python code or silently installing software.
+You can pass the two folder paths as options:
 
-Once Python is available, the shell launcher should automatically start
-`initialize.py`. That Python program should own the dependency checks, reusing
-the useful checks already in `test_functions/test_env.py` rather than running
-a second dependency-checking app. The shell should not repeat package checks.
-Required missing dependencies should get clear installation guidance and
-block setup; optional gaps should be reported without blocking unrelated
-features. Workspace- and database-specific checks should use the user's
-selected paths, not assume the repository root. GUI-managed configurations
-should be kept separate from the standalone configurations in each tool's
-module directory. If `test_env.py` remains a standalone diagnostic, it should
-call the same shared check logic rather than maintain a second implementation.
+```bash
+./bootstrap/bootstrap.sh \
+  --source-root "/media/me/Camera Drive" \
+  --archive-root "/media/me/ChronoVault Archive"
+```
 
-## Planned setup responsibilities
+If either option is omitted, the initializer asks for that path in the
+terminal. The source folder must already exist and be readable. The archive
+destination is created if needed and tested with a temporary write. Successful
+paths are saved to the GUI's personal `gui/gui_settings.ini` so they appear as
+the last-used Source and Archive paths when the GUI opens.
 
-1. Native launchers check that a supported Python runtime is available and
-   give OS-specific installation guidance if it is missing. The Linux/macOS
-   shell launcher is implemented; the Windows launcher is still a placeholder.
-2. The shell launcher automatically starts the Python initializer. The
-   initializer should check required and optional dependencies using shared
-   environment-check logic.
-3. Ask for or confirm the user's workspace and archive locations.
-4. Create only the required workspace directories, without deleting or
-   overwriting existing user data.
-5. Prepare GUI-managed configuration files for the individual tools.
-6. Validate the resulting paths and configurations before the first scan.
+This is not yet a complete first-run pipeline setup. The saved paths are not
+currently synchronized to every tool's database and report configuration, and
+the initializer exits after saving instead of launching the GUI. The GUI still
+uses its Test folder workflow to update those tool configurations.
 
-See the root `TODO.md` and `roadmap.md` for the planned first-run bootstrap
-work. This scaffold is not an installer and does not yet make ChronoVault
-ready to run on a new computer.
+## What initialization checks
+
+- Python 3.8 or newer and the SQLite module.
+- Pillow, which is required by the current image workflow.
+- Optional packages used by OCR and ISO archive listing. Missing optional
+  packages are reported with installation guidance but do not block setup.
+- An offscreen Qt startup check that imports the ChronoVault GUI, constructs its
+  main window, and processes a display event without opening a visible window
+  or changing GUI settings. On Linux, it also checks the Qt XCB plugin for
+  missing shared libraries and names the Debian/Ubuntu package for
+  `libxcb-cursor0` when applicable.
+- If a root `requirements.txt` is added, ordinary package-name requirements
+  are checked for installation and missing packages are reported with a manual
+  pip command. Version constraints are not evaluated yet.
+- The selected source is a readable directory.
+- The archive destination exists or can be created, and accepts a temporary
+  file write.
+
+Packages are never installed automatically. Install any required missing
+dependency yourself, then run the bootstrap again. Initialization does not
+create either database: Indexer creates `located_files.db`, and Importer
+creates `archive_database.db` when it first imports into the archive.
+The GUI check does not verify that the current desktop session can display a
+window; it checks Qt and ChronoVault window startup without requiring a display.
+Terminal use remains available when the optional GUI check fails.
+
+## Windows
+
+`bootstrap.bat` is currently a placeholder. Windows users must start the Python
+initializer manually after installing Python 3.8 or newer:
+
+```text
+py bootstrap\initialize.py --source-root "D:\Photos" --archive-root "E:\ChronoVault"
+```
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `bootstrap.sh` | Python runtime check and launcher for Linux/macOS. |
+| `bootstrap.bat` | Placeholder for a future native Windows runtime check and launcher. |
+| `initialize.py` | Dependency checks, source/archive prompts and access checks, and GUI path persistence. |
+
+This is setup assistance, not an installer. For dependency details, see the
+root README and the relevant tool README files.
