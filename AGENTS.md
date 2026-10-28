@@ -54,6 +54,7 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 | `gui/`, `chronovault.py` | PySide6 launcher, path synchronization, activity log, and diagnostics. | [gui/README.md](gui/README.md) |
 | `generate_test_data/` | Creates disposable synthetic pipeline and classification fixtures. | [generate_test_data/README.md](generate_test_data/README.md) |
 | `test_functions/` | Focused manual diagnostics, including mutating review tests; not a formal test suite. | [test_functions/README.md](test_functions/README.md) |
+| `bootstrap/` | Planned first-run launcher and environment/workspace setup; current files are placeholders. | [bootstrap/README.md](bootstrap/README.md) |
 | `chronovault.sh` | Contained interactive manual pipeline under `chronovault_test/`. | Script comments, [README.md](README.md), and relevant module READMEs |
 
 ## Task-to-context routing
@@ -72,6 +73,7 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 | Duplicate detection | `duplicate_finder/README.md` → `Database_schema.md`; include Condition Database for pre-import duplicate behavior. |
 | GUI or path synchronization | `gui/README.md` → `gui/gui_config.json` and relevant GUI source → README/config of every launched tool affected. |
 | Tests or fixtures | `generate_test_data/README.md` and/or `test_functions/README.md` → relevant script → subsystem README being exercised. |
+| First-run setup/bootstrap | `bootstrap/README.md` → launcher and initializer → dependency/configuration docs affected by the setup behavior. |
 | New feature or broad refactor | `README.md` → `roadmap.md` → relevant specialized docs and implementation. Broaden inspection deliberately. |
 
 ## Repository-wide boundaries

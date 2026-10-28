@@ -39,6 +39,7 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 - Archive-source and ambiguous destination checks guard common path-selection mistakes.
 - The interface remains a launcher/orchestration layer. It does not yet provide a thumbnail browser, date/label filtering, candidate review, duplicate resolution, or audit repair.
 - Running tools can be stopped by terminating their process. Graceful cancellation and cleanup of an in-progress copy are not implemented.
+- `bootstrap/` contains a Linux/macOS shell launcher that checks for Python 3.8+ and starts the adjacent initializer, with OS-specific guidance if no supported runtime is found. The Windows launcher and Python initializer remain placeholders; dependency checks, workspace creation, and configuration generation are not implemented yet.
 
 ### Test support
 
@@ -90,7 +91,7 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 - GUI path synchronization only affects tools mapped to a config entry. Each tool still owns its path configuration, so drift is possible outside the GUI.
 - Some scripts and manual tests assume particular working directories or fixture layouts.
 - The GUI's executable probe is fixed and its subprocess stop action is abrupt.
-- Optional dependencies and external executables are reported by environment checks, but installation is manual.
+- Optional dependencies and external executables are reported by environment checks, but installation is manual. There is no usable first-run bootstrap for preparing a new user's workspace and configurations yet.
 
 ### Tests and generated data
 
@@ -139,6 +140,12 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 - Add audio tag and video container extractors in their existing placeholder packages.
 - Evaluate external sidecars, Takeout metadata, HEIC/RAW support, and archive-known hash/date evidence.
 - Keep speculative content inference and OCR as review aids rather than automatic authority.
+
+### Priority 6: prepare first-run setup
+
+- Decide supported Python versions, dependency groups, and behavior when the runtime is missing.
+- Implement the Linux/macOS shell launcher, Windows launcher, and Python initializer for environment checks, workspace creation, and GUI-managed per-tool configurations.
+- Keep GUI-managed configs separate from the standalone module configs; do not install dependencies or overwrite user settings without explicit action.
 
 ## Candidate review and archive extraction
 

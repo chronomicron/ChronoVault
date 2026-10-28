@@ -45,6 +45,7 @@ The largest cluster of risks comes from one underlying architectural fact: Chron
 | 35 | Make generated fixtures deterministic and safely cleanable | Testing | Medium | Small | Supports 33, 34 |
 | 36 | Repair the contained manual test workflow | Bug / Testing | Medium | Tiny | None |
 | 37 | Add a dependency manifest and CI baseline | Architecture / Testing | Medium | Medium | 33; runtime-policy decision |
+| 38 | Add a cross-platform first-run bootstrap and setup flow | UX / Setup | Medium | Medium | 31, 37 |
 
 ## Backlog details
 
@@ -306,6 +307,13 @@ The largest cluster of risks comes from one underlying architectural fact: Chron
 - **Likely scope:** Packaging metadata, optional dependency groups, CI, lint/test commands.
 - **Dependencies / sequencing:** Decide the supported runtime and external-tool policy; CI becomes more valuable once item 33 exists.
 - **Evidence/status:** Missing planned infrastructure; tracked in `roadmap.md`.
+
+### 38. Add a cross-platform first-run bootstrap and setup flow
+
+- **Why it matters:** A new user currently has to install and check Python dependencies, choose workspace paths, create folders, and edit several tool-specific configuration files manually. The existing `test_env.py` diagnostic itself requires Python, so a native launcher must handle the missing-runtime case first.
+- **Likely scope:** `bootstrap/bootstrap.sh`, a Windows launcher, a Python initializer with shared environment checks (reusing `test_env.py` logic), OS-specific missing-Python guidance, workspace creation, and GUI-managed per-tool configs.
+- **Dependencies / sequencing:** Decide supported Python versions and dependencies with item 37; coordinate generated config and path ownership with item 31.
+- **Evidence/status:** The Linux/macOS shell launcher checks for Python 3.8+ and starts the adjacent initializer, with OS-specific guidance if no supported runtime is found. The Windows launcher and Python initializer remain placeholders; dependency checks, workspace creation, and configuration generation are not implemented yet.
 
 ## Quick wins
 
