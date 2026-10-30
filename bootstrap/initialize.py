@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Initialize a ChronoVault workspace after the native bootstrap launcher.
 
-Checks the Python environment, collects the current source and archive paths,
-verifies access, and saves the paths for the GUI. It does not install packages
-or create pipeline databases; Indexer and Importer own those databases.
+Checks the Python environment, optionally collects source and archive paths,
+verifies any selected paths, and saves only those selections for the GUI. It
+does not install packages or create pipeline databases; Indexer and Importer
+own those databases.
 """
 
 import argparse
-import configparser
 import importlib.util
 import os
 import re
@@ -21,8 +21,9 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-GUI_SETTINGS_PATH = PROJECT_ROOT / "gui" / "gui_settings.ini"
 REQUIREMENTS_PATH = PROJECT_ROOT / "requirements.txt"
+sys.path.insert(0, str(PROJECT_ROOT / "gui"))
+from gui_data import load_gui_runtime, save_gui_runtime, update_gui_runtime_paths, GUI_RUNTIME_PATH
 
 
 def _dependency_result(label, available, detail="", required=False):
@@ -114,6 +115,12 @@ def check_gui_runtime():
         # activity in gui_settings.ini, which this diagnostic must not change.
         gui.check_and_log_startup = lambda settings: False
         gui.save_settings = lambda settings: None
+        gui.save_gui_runtime = lambda runtime: None
+        # Startup folder guidance normally probes the user's selected folders.
+        # The diagnostic window check must not write to source/archive storage.
+        gui.ChronoVaultWindow._folder_problem = staticmethod(
+            lambda value, purpose: "not selected" if not value.strip() else None
+        )
         app = QApplication([])
         window = gui.ChronoVaultWindow()
         window.show()
@@ -209,15 +216,15 @@ def missing_manifest_packages(path):
     return missing
 
 
-def ask_path(label, value):
-    """Return a normalized path, prompting only when no value was supplied."""
-    while not value:
-        try:
-            value = input(f"{label}: ").strip()
-        except EOFError:
-            raise ValueError(f"{label} is required; pass it as a command-line option.")
+def ask_optional_path(label, value):
+    """Return a normalized selected path, or None when the user skips it."""
     if not value:
-        raise ValueError(f"{label} cannot be empty.")
+        try:
+            value = input(f"{label} (press Enter to skip): ").strip()
+        except EOFError:
+            return None
+    if not value:
+        return None
     return Path(value).expanduser().resolve()
 
 
@@ -245,20 +252,13 @@ def prepare_archive_folder(path):
 
 
 def save_gui_paths(source_path, archive_path):
-    """Remember the chosen paths in the GUI's existing personal settings."""
-    settings = configparser.ConfigParser()
-    if GUI_SETTINGS_PATH.is_file():
-        settings.read(GUI_SETTINGS_PATH, encoding="utf-8")
-    if not settings.has_section("paths"):
-        settings.add_section("paths")
-    settings["paths"]["source_folder"] = str(source_path)
-    settings["paths"]["archive_folder"] = str(archive_path)
+    """Save only selected paths, preserving skipped values and other settings."""
+    runtime = load_gui_runtime()
+    update_gui_runtime_paths(runtime, source_folder=source_path, archive_folder=archive_path)
     try:
-        GUI_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with GUI_SETTINGS_PATH.open("w", encoding="utf-8") as settings_file:
-            settings.write(settings_file)
+        save_gui_runtime(runtime)
     except OSError as exc:
-        raise ValueError(f"Could not save selected paths to '{GUI_SETTINGS_PATH}': {exc}") from exc
+        raise ValueError(f"Could not save selected paths to '{GUI_RUNTIME_PATH}': {exc}") from exc
 
 
 def parse_args(argv=None):
@@ -267,6 +267,11 @@ def parse_args(argv=None):
     )
     parser.add_argument("--source-root", help="readable folder to scan")
     parser.add_argument("--archive-root", help="folder where imported files will be stored")
+    parser.add_argument(
+        "--skip-paths",
+        action="store_true",
+        help="skip Source/Archive selection without changing saved runtime paths",
+    )
     return parser.parse_args(argv)
 
 
@@ -279,20 +284,40 @@ def main(argv=None):
         print("\nResolve the required dependency gaps above, then run initialization again.", file=sys.stderr)
         return 1
 
+    if args.skip_paths:
+        try:
+            runtime = load_gui_runtime()
+            save_gui_runtime(runtime)
+        except (OSError, ValueError) as exc:
+            print(f"\nCould not create or preserve the GUI runtime file '{GUI_RUNTIME_PATH}': {exc}", file=sys.stderr)
+            return 1
+        print("\nSource/Archive selection skipped; existing runtime paths were preserved.")
+        print(f"GUI runtime settings: {GUI_RUNTIME_PATH}")
+        print("On a fresh setup, Source and Archive remain blank until selected in the GUI.")
+        return 0
+
     try:
-        source_path = ask_path("Source folder to scan", args.source_root)
-        archive_path = ask_path("Archive destination folder", args.archive_root)
-        check_source_folder(source_path)
-        prepare_archive_folder(archive_path)
+        source_path = ask_optional_path("Source folder to scan", args.source_root)
+        archive_path = ask_optional_path("Archive destination folder", args.archive_root)
+        if source_path is not None:
+            check_source_folder(source_path)
+        if archive_path is not None:
+            prepare_archive_folder(archive_path)
         save_gui_paths(source_path, archive_path)
     except (OSError, ValueError) as exc:
         print(f"\nSetup could not be completed: {exc}", file=sys.stderr)
         return 1
 
-    print("\nPath checks passed:")
-    print(f"  Source:  {source_path} (readable)")
-    print(f"  Archive: {archive_path} (created if needed; writable)")
-    print(f"Saved these paths for the GUI in {GUI_SETTINGS_PATH}.")
+    print("\nPath setup:")
+    if source_path is None:
+        print("  Source:  skipped; any saved value was preserved")
+    else:
+        print(f"  Source:  {source_path} (readable)")
+    if archive_path is None:
+        print("  Archive: skipped; any saved value was preserved")
+    else:
+        print(f"  Archive: {archive_path} (created if needed; writable)")
+    print(f"Saved these paths in the GUI runtime file {GUI_RUNTIME_PATH}.")
     print("Run Indexer to create the source inventory database. Importer creates the archive database when needed.")
     return 0
 

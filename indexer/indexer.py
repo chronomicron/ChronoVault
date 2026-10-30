@@ -38,9 +38,15 @@ import json
 import sys
 import sqlite3
 import os
+import signal
 import subprocess
 from pathlib import Path
 from datetime import datetime
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from config_loader import load_tool_config
 
 # Built-in archive types Indexer knows how to actually list the contents
 # of, without extracting anything. Anything else a person adds to
@@ -62,21 +68,38 @@ KNOWN_ARCHIVE_TYPES = {
 # total actually found before the cap was hit.
 MAX_LISTED_MATCHES = 500
 
+# The active CLI signal handler writes only this value. Database work and
+# filesystem cleanup happen later at scan-loop checkpoints.
+CANCEL_SIGNAL = None
+
+
+def _record_cancel_signal(signum, _frame):
+    global CANCEL_SIGNAL
+    CANCEL_SIGNAL = signum
+
+
+def install_cancel_handlers():
+    """Convert SIGINT/SIGTERM into a cooperative cancellation request."""
+    signal.signal(signal.SIGINT, _record_cancel_signal)
+    signal.signal(signal.SIGTERM, _record_cancel_signal)
+
+
+def cancellation_requested():
+    return CANCEL_SIGNAL is not None
+
 
 def load_config(config_file):
     """Load and validate indexer configuration before touching its database."""
     try:
-        with open(config_file, 'r') as f:
-            config = json.load(f)
+        config = load_tool_config(config_file, 'indexer')
     except FileNotFoundError:
         print(f"Error: Configuration file '{config_file}' not found.")
         sys.exit(1)
     except json.JSONDecodeError:
         print(f"Error: Configuration file '{config_file}' is not valid JSON.")
         sys.exit(1)
-
-    if not isinstance(config, dict):
-        print("Error: Configuration must be a JSON object.")
+    except ValueError as exc:
+        print(f"Error: {exc}")
         sys.exit(1)
 
     database_path = config.get('database_path')
@@ -357,98 +380,6 @@ def init_archive_table(conn):
     conn.commit()
 
 
-def find_files_and_archives(
-    root_path, media_extensions, archive_extensions, skip_nested_archives=True
-):
-    """
-    Walk root_path ONCE, sorting every file into either matching_files
-    (matches the media extensions being searched for) or archive_files
-    (matches the archive extensions being detected) -- never both, so an
-    archive is never mistakenly counted as a media match even if some
-    unusual naming coincidence overlapped. A single walk, rather than one
-    per concern, matters in practice: the real use case here is scanning
-    an old hard drive, potentially a large one, so walking it twice would
-    double a cost that's already significant.
-
-    Returns (matching_files, archive_files, interrupted, interruption_reason,
-    skipped_archive_roots).
-    interrupted is True if the walk didn't finish (an I/O error partway
-    through -- a disconnected drive, a failing sector, permissions
-    changing mid-scan). Whatever was found BEFORE the interruption is
-    still returned, not discarded -- combined with store_files()'s
-    batched commits, this means an interrupted scan still saves
-    everything it found up to that point, rather than losing the whole
-    run. Only a missing/non-directory root path is still a hard,
-    immediate exit -- there's nothing partial to salvage from a search
-    path that was never valid to begin with.
-    """
-    media_ext_set = normalize_extensions(media_extensions)
-    archive_ext_set = normalize_extensions(archive_extensions)
-
-    matching_files = []
-    archive_files = []
-    interrupted = False
-    interruption_reason = None
-
-    root = Path(root_path)
-    if not root.exists():
-        print(f"Error: Path '{root_path}' does not exist.")
-        sys.exit(1)
-    if not root.is_dir():
-        print(f"Error: '{root_path}' is not a directory.")
-        sys.exit(1)
-
-    skipped_archive_roots = []
-
-    def raise_walk_error(error):
-        raise error
-
-    try:
-        root_absolute = os.path.abspath(root)
-        for current_root, child_directories, filenames in os.walk(
-            root, topdown=True, onerror=raise_walk_error
-        ):
-            current_path = Path(current_root)
-
-            # The selected root itself is handled by the existing guard and
-            # its explicit --allow-archive-source override. For a nested root,
-            # prune before visiting any descendants or indexing its own files.
-            if (
-                skip_nested_archives
-                and os.path.abspath(current_root) != root_absolute
-                and 'archive_database.db' in filenames
-            ):
-                skipped_archive_roots.append(current_path)
-                child_directories[:] = []
-                continue
-
-            for filename in filenames:
-                file_path = current_path / filename
-                if not file_path.is_file():
-                    continue
-                if matches_any_extension(file_path, archive_ext_set):
-                    archive_files.append(file_path)
-                    continue
-                if matches_any_extension(file_path, media_ext_set):
-                    matching_files.append(file_path)
-    except OSError as e:
-        # Broadened from PermissionError -- a disconnected drive, a
-        # failing sector, or a network share dropping mid-scan typically
-        # raise OTHER OSError subclasses (FileNotFoundError, "Input/output
-        # error", etc.), not PermissionError specifically, and those were
-        # previously left uncaught, crashing with a raw traceback instead
-        # of a clean, informative stop.
-        interrupted = True
-        interruption_reason = str(e)
-        print(f"\nWarning: Scan interrupted by an I/O error -- {e}")
-        print("This could mean a disconnected drive, a failing sector, or a permissions")
-        print("problem partway through the scan. Files found before the interruption")
-        print("are still saved -- re-run Indexer over the same path once the issue is")
-        print("resolved; already-found files won't be re-inserted.")
-
-    return matching_files, archive_files, interrupted, interruption_reason, skipped_archive_roots
-
-
 COMMIT_BATCH_SIZE = 100
 
 
@@ -481,7 +412,7 @@ def resolve_filesystem_uuid(file_path, device_id, uuid_cache):
     return filesystem_uuid
 
 
-def store_files(conn, files):
+def store_files(conn, files, uuid_cache=None):
     """
     Insert found media files into the database. Skips files already
     present (by file_path). Commits in batches of COMMIT_BATCH_SIZE
@@ -495,7 +426,8 @@ def store_files(conn, files):
     cursor = conn.cursor()
     inserted = 0
     skipped = 0
-    uuid_cache = {}
+    if uuid_cache is None:
+        uuid_cache = {}
 
     for i, file_path in enumerate(files, 1):
         try:
@@ -661,7 +593,10 @@ def list_archive_contents(archive_path, archive_type, media_ext_set):
                 'note': f"could not read archive contents: {e}"}
 
 
-def store_archives(conn, archive_files, media_extensions, look_inside_archives):
+def store_archives(
+    conn, archive_files, media_extensions, look_inside_archives,
+    should_cancel=None,
+):
     """
     Record every detected archive's location, unconditionally. If
     look_inside_archives is True, also attempt to list contents for any
@@ -695,13 +630,22 @@ def store_archives(conn, archive_files, media_extensions, look_inside_archives):
             already_listed += 1
             continue
 
+        cancel_before_listing = (
+            look_inside_archives and should_cancel and should_cancel()
+        )
+        if existing and cancel_before_listing:
+            # Keep prior listing notes/state unchanged when a stop request
+            # prevents this run from retrying an unfinished listing.
+            already_known += 1
+            continue
+
         archive_type = classify_archive_type(file_path)
         try:
             archive_size = file_path.stat().st_size
         except OSError:
             archive_size = None
 
-        if look_inside_archives:
+        if look_inside_archives and not cancel_before_listing:
             result = list_archive_contents(file_path, archive_type, media_ext_set)
             contents_listed = 1 if result['success'] else 0
             matching_file_count = len(result['matching']) if result['success'] else None
@@ -748,6 +692,124 @@ def store_archives(conn, archive_files, media_extensions, look_inside_archives):
     }
 
 
+def scan_and_store(
+    conn, root_path, media_extensions, archive_extensions,
+    look_inside_archives, skip_nested_archives=True,
+):
+    """Walk once and persist discovered media/archive paths in bounded batches."""
+    root = Path(root_path)
+    if not root.exists():
+        print(f"Error: Path '{root_path}' does not exist.")
+        sys.exit(1)
+    if not root.is_dir():
+        print(f"Error: '{root_path}' is not a directory.")
+        sys.exit(1)
+
+    media_ext_set = normalize_extensions(media_extensions)
+    archive_ext_set = normalize_extensions(archive_extensions)
+    media_batch = []
+    archive_batch = []
+    uuid_cache = {}
+    skipped_archive_roots = []
+    stats = {
+        'media_discovered': 0,
+        'media_inserted': 0,
+        'media_skipped': 0,
+        'archive_discovered': 0,
+        'archive_stats': {
+            'newly_recorded': 0,
+            'already_known': 0,
+            'newly_listed': 0,
+            'already_listed': 0,
+            'listing_failed': 0,
+        },
+        'interrupted': False,
+        'interruption_reason': None,
+        'skipped_archive_roots': skipped_archive_roots,
+        'stopped': False,
+    }
+
+    def flush_media_batch():
+        if not media_batch:
+            return
+        inserted, skipped = store_files(conn, media_batch, uuid_cache)
+        stats['media_inserted'] += inserted
+        stats['media_skipped'] += skipped
+        media_batch.clear()
+
+    def flush_archive_batch():
+        if not archive_batch:
+            return
+        batch_stats = store_archives(
+            conn,
+            archive_batch,
+            media_extensions,
+            look_inside_archives,
+            should_cancel=cancellation_requested,
+        )
+        for name, count in batch_stats.items():
+            stats['archive_stats'][name] += count
+        archive_batch.clear()
+
+    def raise_walk_error(error):
+        raise error
+
+    try:
+        root_absolute = os.path.abspath(root)
+        for current_root, child_directories, filenames in os.walk(
+            root, topdown=True, onerror=raise_walk_error
+        ):
+            if cancellation_requested():
+                stats['stopped'] = True
+                break
+
+            current_path = Path(current_root)
+            if (
+                skip_nested_archives
+                and os.path.abspath(current_root) != root_absolute
+                and 'archive_database.db' in filenames
+            ):
+                skipped_archive_roots.append(current_path)
+                child_directories[:] = []
+                continue
+
+            for filename in filenames:
+                if cancellation_requested():
+                    stats['stopped'] = True
+                    break
+
+                file_path = current_path / filename
+                if not file_path.is_file():
+                    continue
+                if matches_any_extension(file_path, archive_ext_set):
+                    stats['archive_discovered'] += 1
+                    archive_batch.append(file_path)
+                    if len(archive_batch) >= COMMIT_BATCH_SIZE:
+                        flush_archive_batch()
+                    continue
+                if matches_any_extension(file_path, media_ext_set):
+                    stats['media_discovered'] += 1
+                    media_batch.append(file_path)
+                    if len(media_batch) >= COMMIT_BATCH_SIZE:
+                        flush_media_batch()
+
+            if stats['stopped']:
+                break
+    except OSError as error:
+        stats['interrupted'] = True
+        stats['interruption_reason'] = str(error)
+        print(f"\nWarning: Scan interrupted by an I/O error -- {error}")
+        print("Files found before the interruption will still be saved.")
+    finally:
+        # A signal stops discovery, but all paths already collected in these
+        # bounded batches are persisted before the caller closes SQLite.
+        flush_media_batch()
+        flush_archive_batch()
+
+    stats['stopped'] = stats['stopped'] or cancellation_requested()
+    return stats
+
+
 def looks_like_chronovault_archive(root_path):
     """
     True if root_path itself directly contains archive_database.db --
@@ -772,6 +834,10 @@ def looks_like_chronovault_archive(root_path):
 
 
 def main():
+    global CANCEL_SIGNAL
+    CANCEL_SIGNAL = None
+    install_cancel_handlers()
+
     args = sys.argv[1:]
     allow_archive_source = '--allow-archive-source' in args
     args = [a for a in args if a != '--allow-archive-source']
@@ -825,39 +891,33 @@ def main():
 
     conn = init_database(database_path)
     init_archive_table(conn)
+    try:
+        scan_stats = scan_and_store(
+            conn,
+            root_path,
+            extensions,
+            archive_extensions,
+            look_inside_archives,
+            skip_nested_archives=not (source_root_is_archive and allow_archive_source),
+        )
+    finally:
+        conn.close()
 
-    (
-        files,
-        archive_files,
-        interrupted,
-        interruption_reason,
-        skipped_archive_roots,
-    ) = find_files_and_archives(
-        root_path,
-        extensions,
-        archive_extensions,
-        skip_nested_archives=not (source_root_is_archive and allow_archive_source),
-    )
-    print(f"Found {len(files)} matching media file(s) on disk.")
-    print(f"Found {len(archive_files)} archive file(s) on disk.")
-    if skipped_archive_roots:
-        print(f"Skipped {len(skipped_archive_roots)} nested ChronoVault archive root(s):")
-        for archive_root in skipped_archive_roots:
+    archive_stats = scan_stats['archive_stats']
+    print(f"Found {scan_stats['media_discovered']} matching media file(s) on disk.")
+    print(f"Found {scan_stats['archive_discovered']} archive file(s) on disk.")
+    if scan_stats['skipped_archive_roots']:
+        print(f"Skipped {len(scan_stats['skipped_archive_roots'])} nested ChronoVault archive root(s):")
+        for archive_root in scan_stats['skipped_archive_roots']:
             print(f"  {archive_root}")
-
-    inserted, skipped = store_files(conn, files)
-
-    archive_stats = store_archives(conn, archive_files, extensions, look_inside_archives)
-
-    conn.close()
 
     print("-" * 60)
     print("Media files:")
-    print(f"  Inserted into database: {inserted}")
-    print(f"  Already in database (skipped): {skipped}")
-    print(f"  Total matching files: {len(files)}")
+    print(f"  Inserted into database: {scan_stats['media_inserted']}")
+    print(f"  Already in database (skipped): {scan_stats['media_skipped']}")
+    print(f"  Total matching files: {scan_stats['media_discovered']}")
 
-    if archive_files:
+    if scan_stats['archive_discovered']:
         print()
         print("Archives:")
         print(f"  Newly recorded (location only): {archive_stats['newly_recorded']}")
@@ -873,10 +933,21 @@ def main():
                   f"their locations are saved, so turning this on later will pick them up "
                   f"without needing to rescan {root_path}")
 
-    if interrupted:
+    if scan_stats['stopped']:
+        received_signal = CANCEL_SIGNAL or signal.SIGTERM
+        print()
+        print(f"Scan stopped by request ({signal.Signals(received_signal).name}).")
+        print(f"  Media discovered: {scan_stats['media_discovered']}")
+        print(f"  Media inserted: {scan_stats['media_inserted']}")
+        print(f"  Already present / skipped: {scan_stats['media_skipped']}")
+        print(f"  Archive files discovered: {scan_stats['archive_discovered']}")
+        print("Pending discovered rows were saved; rerunning is safe and skips existing paths.")
+        sys.exit(128 + received_signal)
+
+    if scan_stats['interrupted']:
         print()
         print("=" * 60)
-        print(f"WARNING: The scan was interrupted before completing -- {interruption_reason}")
+        print(f"WARNING: The scan was interrupted before completing -- {scan_stats['interruption_reason']}")
         print(f"Everything found up to that point has been saved (see counts above).")
         print(f"Re-run Indexer over the same path once the issue is resolved -- already-")
         print(f"found files won't be re-inserted, so this just picks up where it left off.")
@@ -885,7 +956,6 @@ def main():
         # "finished, but something went wrong" apart from a clean run --
         # without this looking like a crash, which it genuinely isn't.
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()

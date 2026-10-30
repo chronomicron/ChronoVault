@@ -5,9 +5,11 @@
 chronovault_test/
 
 # --- ChronoVault: GUI personal settings (not shared, machine-specific) ---
-# Your last-used Source/Archive folder paths -- gui_config.json (the
-# static, developer-facing tool-location config) IS checked in; this
-# is not.
+# Runtime paths and tool settings are personal. The example runtime template
+# and static gui_config.json tool map are tracked.
+gui/gui_runtime.json
+
+# Activity log only; path authority lives in gui_runtime.json.
 gui/gui_settings.ini
 
 # Generated on demand by the "Generate Diagnostic Report" button --

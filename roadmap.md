@@ -26,7 +26,7 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 
 ### Conditioning, import, and review
 
-- Condition Database validates source hash freshness from hash-time size and nanosecond modification time, runs shared date analysis, and recalculates duplicate groups on each run. Duplicate Finder `source` mode uses the same freshness rule. Metadata fingerprints cannot detect content changes that preserve both size and modification time.
+- Condition Database validates source hash freshness from hash-time size and nanosecond modification time, processes images before videos and other file types, runs shared date analysis, and recalculates duplicate groups on each run. Duplicate Finder `source` mode uses the same freshness rule. Metadata fingerprints cannot detect content changes that preserve both size and modification time.
 - Date analysis currently combines JPEG-family GPS/EXIF/XMP, TIFF `DateTime`, filename, folder, filesystem, and opt-in OCR evidence. Audio- and video-specific metadata are not implemented.
 - Importer copies selected sources into dated folders, routes confidence below 50 to `_review_needed/`, and records archive metadata in `archive_database.db`.
 - `retrieve_data` reads review state without mutation. `write_data` applies a chosen date, moves the archive file, and preserves original algorithmic fields while recording correction metadata.
@@ -35,12 +35,12 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 
 ### User interface and diagnostics
 
-- The PySide6 GUI launches the pipeline and supporting tools, streams output, synchronizes configured paths for mapped tools, records activity, and generates a diagnostic report.
+- The PySide6 GUI launches the pipeline and supporting tools, streams output, synchronizes configured paths for mapped tools, records activity, and generates a diagnostic report. The Prepare stage shows Condition Database progress and exposes a cooperative Stop action.
 - At startup, the GUI shows a friendly non-blocking reminder with separate Source and Archive folder selectors when either saved path is unset or unavailable. It checks folder access without requiring the pipeline databases to exist.
 - Archive-source and ambiguous destination checks guard common path-selection mistakes.
 - The interface remains a launcher/orchestration layer. It does not yet provide a thumbnail browser, date/label filtering, candidate review, duplicate resolution, or audit repair.
-- Running tools can be stopped by terminating their process. Graceful cancellation and cleanup of an in-progress copy are not implemented.
-- `bootstrap/` has a Linux/macOS shell launcher and Python initializer. The launcher checks for Python 3.8+ and gives OS-specific guidance if no supported runtime is found. The initializer checks dependencies and offscreen Qt/main-window startup, validates the chosen source and archive folders, creates and write-checks the archive destination, and saves the paths in the GUI's personal settings. It does not install dependencies, create databases, or launch the GUI. The Windows launcher remains a placeholder.
+- Indexer and Condition Database handle `SIGINT`/`SIGTERM` cooperatively. The GUI currently exposes Stop and progress only for Condition Database; Indexer has no GUI stop/progress control, and other tools have no cooperative cancellation contract. Interrupted Importer copies still lack a temporary-file/finalize protocol.
+- `bootstrap/` has a Linux/macOS shell launcher and Python initializer. The launcher checks for Python 3.8+ and gives OS-specific guidance if no supported runtime is found. The initializer checks dependencies and offscreen Qt/main-window startup, validates the chosen source and archive folders, creates and write-checks the archive destination, and saves paths to the central GUI runtime file. `--skip-paths` preserves existing values or leaves fresh values blank. It does not install dependencies, create databases, or launch the GUI. The Windows launcher remains a placeholder.
 
 ### Test support
 
@@ -89,20 +89,22 @@ Duplicate Finder and the `retrieve_data`/`write_data` review boundary support th
 
 ### GUI, configuration, and portability
 
-- GUI path synchronization only affects tools mapped to a config entry. Each tool still owns its path configuration, so drift is possible outside the GUI.
-- Bootstrap saves Source and Archive paths in `gui_settings.ini`, but those values do not yet configure every tool's database and report paths. The GUI still updates those paths through its Test folder workflow, and the initializer currently exits without launching the GUI. Consistent per-action synchronization remains to be implemented.
+- The GUI presents Index, Prepare, Import, and Verify stages, with separate exact-extension selectors for Indexer and Importer. Prepare runs Classify Media and Condition Database in sequence; Duplicate Finder and read-only review-data access are available after Import.
+- Indexer and Importer accept their section from the central runtime JSON while retaining standalone config support. Classify Media, Condition Database, Audit Archive, Duplicate Finder, and review-data access still use module configs that the GUI synchronizes before launch. Diagnostic reports include active Indexer/Importer settings and the selected inventory database; remaining module-config settings are still reported from their files.
+- Bootstrap saves Source and Archive paths in `gui_runtime.json` but still exits without launching the GUI.
+- The GUI database selector changes the active inventory path but does not move a database. Archive selection changes the destination but does not relocate an existing archive. Safe relocation actions remain to be designed and implemented.
 - The Linux default inventory database location has been selected as `~/.local/share/chronovault/located_files.db`, but implementation and handling of `XDG_DATA_HOME` are still pending. macOS and Windows locations remain undecided.
 - Some scripts and manual tests assume particular working directories or fixture layouts.
-- The GUI's executable probe is fixed and its subprocess stop action is abrupt.
+- Controlled cancellation is only partially implemented: the GUI can stop Condition Database and display its stage/file progress, and Indexer can handle CLI signals while flushing discovered batches. The GUI does not yet stop Indexer or display scan progress; other tools also lack GUI cancellation, and closing the GUI does not coordinate shutdown.
 - Optional dependencies and external executables are reported by environment checks, but installation is manual. There is no usable first-run bootstrap for preparing a new user's workspace and configurations yet.
 
 ### Planned configuration contract
 
-The GUI will own one user-specific central runtime JSON for its tool settings. Its `tools` object is keyed by stable tool IDs, and each tool section uses exactly the same field names and value types as that tool's standalone JSON. A GUI launch passes the central file path; the tool selects its own section. A standalone launch passes that tool's private JSON path, or uses the existing module config by default; the tool reads the same fields from the file's top level. This keeps the tool's configuration shape consistent across both launch modes.
+The GUI owns one user-specific central runtime JSON for its tool settings. Its `tools` object is keyed by stable tool IDs, and each migrated tool section uses the same field names and value types as that tool's standalone JSON. A GUI launch passes the central file path; the tool selects its own section. A standalone launch passes that tool's private JSON path, and the tool reads the same fields from the file's top level.
 
-The GUI updates the relevant path fields in its own central config when the user changes Source, Archive, or inventory database locations, then passes the central config path to the selected tool. Tools read configuration and do not rewrite the GUI's central file. The checked-in `gui/gui_config.json` remains a static script/location map and is separate from the user-owned runtime settings. This design is accepted but not implemented; current GUI code still updates module config files.
+The GUI stores Source, Archive, inventory path, and Indexer/Importer selections in the central config. The checked-in `gui/gui_config.json` remains a static script/config location map. Indexer and Importer consume central sections while retaining standalone config use. Other launched tools still run from module configs; the GUI synchronizes their current paths and stage options before launch. The user can select a different inventory file, but database relocation and platform-specific default resolution are not implemented.
 
-Migration should add one shared config loader and validation contract, preserve existing standalone CLI behavior, migrate each tool and its README in small steps, then switch the GUI to central-config writes and per-tool config-path launches. Test each tool in both central-config and standalone-config modes before removing any legacy behavior. Define CLI override precedence and required keys before implementation.
+Continue migrating one tool at a time, preserving standalone CLI behavior and documenting both config forms. Validate each migrated tool in central-config and standalone-config modes before removing legacy behavior. Define CLI override precedence and required keys before migrating tools with CLI overrides.
 
 ### Tests and generated data
 

@@ -254,10 +254,10 @@ The largest cluster of risks comes from one underlying architectural fact: Chron
 
 ### 30. Add controlled GUI cancellation
 
-- **Why it matters:** There is no Stop button. Closing the window does not implement a coordinated cancellation protocol, and killing a copy can expose the partial-operation risks above.
-- **Likely scope:** `gui/chronovault_gui.py`, subprocess signaling, tool cancellation contracts.
+- **Why it matters:** Stop and progress are currently limited to Condition Database. Indexer has cooperative CLI signals but no GUI control or scan progress; other tools and interrupted Importer copies still lack a coordinated cancellation/recovery path.
+- **Likely scope:** Extend the GUI and affected tools with explicit cancellation/progress contracts, then address partial-copy recovery without exposing incomplete archive files as complete.
 - **Dependencies / sequencing:** Add only after the affected tools define safe interruption and restart behavior.
-- **Evidence/status:** Confirmed missing capability. The roadmap wording implying an existing abrupt stop action is inaccurate.
+- **Evidence/status:** Partly implemented. Indexer handles `SIGINT`/`SIGTERM` at scan checkpoints and persists bounded batches. Condition Database reports JSON progress events, handles cooperative signals, commits completed hash/date rows, and rolls back duplicate regrouping on stop; the GUI displays its progress and sends `SIGTERM`. GUI cancellation for Indexer and other tools, Indexer progress reporting, and safe recovery of interrupted Importer copies remain open.
 
 ### 31. Unify GUI and standalone tool configuration loading
 
@@ -265,14 +265,14 @@ The largest cluster of risks comes from one underlying architectural fact: Chron
 - **Accepted configuration contract:** A user-owned central JSON contains a `tools` object keyed by stable tool IDs (for example, `indexer` and `condition_database`). Each tool's nested object uses the same field names and value types as that tool's standalone JSON. When launched by the GUI, the tool receives the central config path and reads its own section. When launched standalone, it receives its private config path—or defaults to its existing module config—and reads the same fields from the top level. Shared path values are written to all relevant tool sections using each tool's existing field names. The checked-in `gui/gui_config.json` remains the static script/location map; the user-owned runtime config is a separate file.
 - **Likely scope:** Shared config loading/validation helper; consistent CLI config-path argument handling; every tool's config loader and README; GUI runtime config creation/editing and per-action path synchronization; diagnostics and first-run setup. Keep standalone configs usable and do not write GUI settings into module config files.
 - **Dependencies / sequencing:** Build on canonical path semantics and preflight checks. Define the required fields and behavior for values supplied by both central config and CLI overrides before migrating tools. Migrate one tool at a time with compatibility checks.
-- **Evidence/status:** Architecture accepted and documented; implementation not started. Current GUI behavior still edits module config files for Test-folder database/report paths and selected per-action archive paths. The GUI currently stores Source/Archive selections separately in `gui_settings.ini`.
+- **Evidence/status:** Partly implemented. Indexer and Importer accept either standalone configs or their central runtime sections; GUI selectors and Import filters route into those sections. Source, Archive, and inventory selections are saved centrally. Classify Media, Condition Database, Audit Archive, Duplicate Finder, and review-data access still consume module configs, which the GUI synchronizes before launch. Diagnostic reports now include the active Indexer/Importer settings and selected inventory database; remaining tools still need central-config support.
 
 ### 32. Add GUI review, duplicate, and repair workflows
 
 - **Why it matters:** The GUI is presently a launcher. Users cannot review uncertain dates, candidate media, duplicate groups, or proposed audit repairs without terminal/manual workflows.
 - **Likely scope:** Qt UI, read-only query APIs, explicit mutation APIs, thumbnails/search.
 - **Dependencies / sequencing:** Requires candidate lifecycle and safe repair boundaries; should continue reusing CLI/domain logic.
-- **Evidence/status:** Missing planned feature; described in longer-term roadmap work.
+- **Evidence/status:** Partly implemented as read-only access: the GUI runs Duplicate Finder and the existing review-data diagnostic. Interactive candidate/date review, correction, duplicate decisions, and repair are still missing and require their existing lifecycle/safety foundations.
 
 ### 33. Build automated unit and migration tests
 
@@ -314,7 +314,7 @@ The largest cluster of risks comes from one underlying architectural fact: Chron
 - **Why it matters:** A new user currently has to install and check Python dependencies, choose workspace paths, create folders, and edit several tool-specific configuration files manually. The existing `test_env.py` diagnostic itself requires Python, so a native launcher must handle the missing-runtime case first.
 - **Likely scope:** `bootstrap/bootstrap.sh`, a Windows launcher, a Python initializer with dependency and GUI-startup checks, OS-specific missing-Python guidance, path validation, and GUI-managed per-tool configs. Keep standalone CLI configs usable and do not install dependencies automatically.
 - **Dependencies / sequencing:** Decide supported Python versions and dependencies with item 37; coordinate generated config and path ownership with item 31.
-- **Evidence/status:** The Linux/macOS shell launcher checks for Python 3.8+ and starts the initializer. The initializer checks current required/optional dependencies, performs an offscreen Qt/main-window startup check, accepts or prompts for source/archive paths, checks source readability, creates and write-checks the archive folder, and saves both paths in `gui/gui_settings.ini`. The GUI now shows a friendly non-blocking startup reminder when either saved folder is unset or inaccessible, with separate folder selectors; database files are not required at startup. Neither component installs packages or creates databases. Linux's proposed inventory DB default is `~/.local/share/chronovault/located_files.db`; macOS and Windows locations remain undecided, and no platform-specific resolution is implemented. Still needed: launch the GUI after successful setup, implement the central runtime config and shared tool loader described in item 31, choose the GUI-owned config location, implement database-location resolution, consolidate checks with `test_env.py`, and implement the Windows launcher. The GUI currently updates database/report paths through its Test folder workflow.
+- **Evidence/status:** The Linux/macOS shell launcher checks for Python 3.8+ and starts the initializer. The initializer checks dependencies and Qt startup, independently accepts optional Source/Archive paths, and saves only supplied values in `gui/gui_runtime.json`; `--skip-paths` skips both prompts. The GUI shows a friendly non-blocking reminder when either saved folder is unset or inaccessible, and offers an inventory file selector. Neither component installs dependencies, creates databases, or launches the GUI after setup. Indexer and Importer consume central tool sections; other tools still use module configs. Linux's proposed inventory DB default is `~/.local/share/chronovault/located_files.db`; XDG handling and macOS/Windows locations remain undecided, and platform-specific resolution is not implemented. Still needed: launch the GUI after successful setup, implement the application-data default and safe database/archive relocation controls, migrate remaining tools and diagnostics to central configuration, consolidate checks with `test_env.py`, and implement the Windows launcher.
 
 ## Quick wins
 
@@ -398,8 +398,8 @@ The roadmap is generally accurate and unusually candid. No whole roadmap section
 
 ### Contradicted or misleading
 
-- The roadmap says the GUI subprocess stop action is abrupt and that running tools can be stopped by terminating their process. The application has no Stop control; only external termination or closing the application is available.
-- Any wording suggesting Indexer’s batch commits preserve partially completed discovery should be qualified: discovered paths are accumulated before storage, so interruption during discovery loses that run’s collected scan results.
+- The roadmap now documents cooperative stop support as partial: Indexer and Condition Database support process signals, while GUI Stop/progress covers only Condition Database.
+- Indexer now writes discovery batches during traversal. If interrupted, already committed rows are retained; files and directories not yet visited remain for the next scan.
 
 ### Duplicated roadmap material
 

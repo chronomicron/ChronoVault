@@ -36,7 +36,7 @@ Supporting components:
 - **[Analyze Date](analyze_date/README.md)** is the shared evidence-gathering and scoring library used by Condition Database and Importer. Current signals cover JPEG-family metadata, TIFF dates, filenames, containing folders, filesystem timestamps, and opt-in image OCR. See [Date Signals](Date_signals.md) for the authoritative evidence catalog.
 - **[Duplicate Finder](duplicate_finder/README.md)** reports SHA-256 duplicate groups in the source inventory or the archive. It never deletes or selects a preferred copy.
 - **[Retrieve Data](retrieve_data/README.md)** provides read-only structured access to review rows. **[Write Data](write_data/README.md)** is the explicit mutating boundary for applying a person's date correction and moving the corresponding archive file.
-- **[GUI](gui/README.md)** is a PySide6 launcher that streams tool output, synchronizes supported archive paths, records recent activity, and produces diagnostic reports.
+- **[GUI](gui/README.md)** presents the pipeline as ordered stages, routes file-type and filter selections into tools, streams output, and provides progress and a cooperative Stop action for Condition Database.
 - **[Generate Test Data](generate_test_data/README.md)** and **[test_functions](test_functions/README.md)** support disposable manual testing. They are not a formal automated test suite.
 
 ## Data and archive layout
@@ -61,7 +61,7 @@ The databases are related by convention rather than foreign keys, and schema add
 
 ChronoVault is currently a developer-oriented repository rather than an installed Python package. There is no `requirements.txt`, `pyproject.toml`, installer, or container definition. Run commands from the repository root because many configured paths are resolved from the process working directory.
 
-The Linux/macOS bootstrap provides partial first-run setup: it checks Python and current dependencies, validates source/archive paths, and saves them for the GUI. It does not install packages, configure every tool's database path, or launch the GUI yet. See [bootstrap/README.md](bootstrap/README.md) for current behavior and remaining setup work.
+The Linux/macOS bootstrap provides partial first-run setup: it checks Python and current dependencies, validates selected source/archive paths, and saves them to the GUI's central runtime file. At either path prompt, Enter skips that path and preserves its saved value; `--skip-paths` skips both prompts. The GUI runtime migration is incremental: Indexer and Importer read their central tool sections, while other tools still use their module configs. Bootstrap does not install packages or launch the GUI. See [bootstrap/README.md](bootstrap/README.md) for details.
 
 ### Requirements
 
@@ -97,7 +97,7 @@ This checks required and optional components and reports what is available. It i
 
 The interactive test runner keeps its generated media, databases, archive, and reports under `chronovault_test/`. Its cleanup action deletes that disposable directory, so read the prompt and do not repurpose the directory for real media.
 
-The underlying pipeline can also be run directly after reviewing each tool's `config.json`:
+The underlying pipeline can also be run directly after reviewing each tool's `config.json`. Standalone Indexer and Importer configs remain supported; the GUI passes its central runtime file to both:
 
 ```bash
 python3 indexer/indexer.py indexer/config.json /path/to/source
@@ -109,6 +109,8 @@ python3 audit_archive/audit_archive.py audit_archive/config.json
 
 Treat configuration paths as operational state: they may point to real media or be changed by the GUI. Prefer a disposable source and destination until you understand the resulting databases and archive layout.
 
+The GUI launches Indexer and Importer with `gui/gui_runtime.json`; both also continue to accept their standalone configs. Other GUI-launched tools still receive their module configs, which the GUI synchronizes before launching.
+
 ### Use the GUI launcher
 
 After installing PySide6:
@@ -117,7 +119,7 @@ After installing PySide6:
 python3 chronovault.py
 ```
 
-The GUI exposes the working tools and diagnostics, but it is not yet a media browser or full review interface. See its [README](gui/README.md) for path synchronization, safety checks, dependencies, and current limitations.
+The GUI presents Index, Prepare, Import, and Verify stages with separate extension selectors. It is not a media browser or interactive correction interface. See its [README](gui/README.md) for path synchronization, safety checks, dependencies, and current limitations.
 
 ## Current status and direction
 

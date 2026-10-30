@@ -1,6 +1,6 @@
 {
     "database_path": "/home/omoikane/workspace/ChronoVault/chronovault_test/indexer/located_files.db",
-    "output_report_path": "/home/omoikane/workspace/ChronoVault/chronovault_test/reports/condition_report.json",
+    "output_report_path": "/home/omoikane/workspace/ChronoVault/chronovault_test/indexer/reports/condition_report.json",
     "mismatch_threshold_days": 1,
     "try_ocr": false
 }

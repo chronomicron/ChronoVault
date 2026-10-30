@@ -11,14 +11,14 @@ from PIL.ExifTags import TAGS, GPSTAGS
 # directory, so "from analyze_date.analyze_date import analyze_date" works
 # whether ChronoVault is run via ./chronovault.sh or called directly.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from config_loader import load_tool_config
 from analyze_date.analyze_date import analyze_date
 
 
 def load_config(config_file):
-    """Load the importer configuration from JSON."""
+    """Load standalone importer settings or its section in GUI runtime JSON."""
     try:
-        with open(config_file, 'r') as f:
-            config = json.load(f)
+        config = load_tool_config(config_file, 'importer')
         database_path = config.get('database_path')
         archive_root = config.get('archive_root')
         extensions = config.get('extensions_to_copy', [])
@@ -64,6 +64,9 @@ def load_config(config_file):
         sys.exit(1)
     except json.JSONDecodeError:
         print(f"Error: Configuration file '{config_file}' is not valid JSON.")
+        sys.exit(1)
+    except ValueError as exc:
+        print(f"Error: {exc}")
         sys.exit(1)
 
 
@@ -517,4 +520,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    

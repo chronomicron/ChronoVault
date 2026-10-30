@@ -25,11 +25,79 @@ GUI_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = GUI_DIR.parent
 GUI_CONFIG_PATH = GUI_DIR / "gui_config.json"
 GUI_SETTINGS_PATH = GUI_DIR / "gui_settings.ini"
+GUI_RUNTIME_PATH = GUI_DIR / "gui_runtime.json"
+GUI_RUNTIME_EXAMPLE_PATH = GUI_DIR / "gui_runtime.example.json"
 
-PATHS_SECTION = 'paths'
 LOG_SECTION = 'log'
 MAX_LOG_ENTRIES = 50
 CLEAN_SHUTDOWN_MARKER = "Application closed (clean shutdown)"
+
+
+def load_gui_runtime():
+    """Load personal runtime settings, falling back to the tracked template.
+
+    When creating a runtime file for an existing installation, carry forward
+    its old Source/Archive/Test values from gui_settings.ini once. Thereafter
+    the central runtime JSON is the sole path authority.
+    """
+    runtime_path = GUI_RUNTIME_PATH if GUI_RUNTIME_PATH.is_file() else GUI_RUNTIME_EXAMPLE_PATH
+    with runtime_path.open('r', encoding='utf-8') as runtime_file:
+        runtime = json.load(runtime_file)
+
+    _validate_gui_runtime(runtime)
+    for key in ('source_folder', 'archive_folder', 'test_folder'):
+        runtime['gui'].setdefault(key, '')
+    runtime['gui'].setdefault('prepare_classify_images', True)
+    runtime['gui'].setdefault('prepare_try_ocr', False)
+
+    if runtime_path != GUI_RUNTIME_PATH and GUI_SETTINGS_PATH.is_file():
+        legacy_settings = configparser.ConfigParser()
+        legacy_settings.read(GUI_SETTINGS_PATH, encoding='utf-8')
+        if legacy_settings.has_section('paths'):
+            for key in ('source_folder', 'archive_folder', 'test_folder'):
+                legacy_value = legacy_settings['paths'].get(key, '', raw=True).strip()
+                if legacy_value:
+                    runtime['gui'][key] = legacy_value
+    return runtime
+
+
+def save_gui_runtime(runtime):
+    """Persist the GUI-owned runtime configuration without touching tool JSONs."""
+    _validate_gui_runtime(runtime)
+    GUI_RUNTIME_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with GUI_RUNTIME_PATH.open('w', encoding='utf-8') as runtime_file:
+        json.dump(runtime, runtime_file, indent=4)
+        runtime_file.write('\n')
+
+
+def _validate_gui_runtime(runtime):
+    if not isinstance(runtime, dict):
+        raise ValueError("GUI runtime configuration must be a JSON object.")
+    if runtime.get('schema_version') != 1:
+        raise ValueError(f"Unsupported GUI runtime schema version: {runtime.get('schema_version')}")
+    if not isinstance(runtime.get('gui'), dict) or not isinstance(runtime.get('tools'), dict):
+        raise ValueError("GUI runtime configuration must contain object-valued 'gui' and 'tools' blocks.")
+    if not isinstance(runtime['tools'].get('indexer'), dict):
+        raise ValueError("GUI runtime configuration must contain an object-valued 'tools.indexer' section.")
+    for key in ('source_folder', 'archive_folder', 'test_folder'):
+        if key in runtime['gui'] and not isinstance(runtime['gui'][key], str):
+            raise ValueError(f"GUI runtime field 'gui.{key}' must be a string.")
+    for key in ('prepare_classify_images', 'prepare_try_ocr'):
+        if key in runtime['gui'] and not isinstance(runtime['gui'][key], bool):
+            raise ValueError(f"GUI runtime field 'gui.{key}' must be true or false.")
+
+
+def update_gui_runtime_paths(runtime, source_folder=None, archive_folder=None, test_folder=None):
+    """Update only supplied GUI paths, retaining every other runtime setting."""
+    gui = runtime['gui']
+    for key, value in (
+        ('source_folder', source_folder),
+        ('archive_folder', archive_folder),
+        ('test_folder', test_folder),
+    ):
+        if value is not None:
+            gui[key] = str(value)
+    return runtime
 
 
 def get_test_folder_paths(test_folder):
@@ -53,8 +121,9 @@ def get_test_folder_paths(test_folder):
 
 def configure_test_folder(gui_config, test_folder):
     """
-    Create the workspace's standard subfolders and repoint every dependent
-    tool config at that workspace. Existing folders and files are preserved.
+    Create the workspace's standard subfolders and repoint non-Indexer tool
+    configs at that workspace. Indexer's database path is stored in the central
+    runtime config by the GUI. Existing folders and files are preserved.
 
     Returns the path dictionary from get_test_folder_paths().
     """
@@ -63,7 +132,6 @@ def configure_test_folder(gui_config, test_folder):
         Path(paths[key]).mkdir(parents=True, exist_ok=True)
 
     updates_by_tool = {
-        'indexer': {'database_path': paths['database_path']},
         'classify_media': {
             'database_path': paths['database_path'],
             'output_report_path': paths['classification_report_path'],
@@ -101,14 +169,15 @@ def configure_test_folder(gui_config, test_folder):
 def load_settings():
     """
     Load gui_settings.ini (starting fresh if it doesn't exist yet),
-    ensuring both expected sections exist. Centralized here rather than
-    in chronovault_gui.py so this is testable without Qt, and so there's
-    one place defining what a "valid" settings file looks like.
+    retaining the activity log section only. Legacy path values are migrated
+    by load_gui_runtime() before this removes the old paths section.
     """
     settings = configparser.ConfigParser()
     settings.read(GUI_SETTINGS_PATH)
-    if not settings.has_section(PATHS_SECTION):
-        settings.add_section(PATHS_SECTION)
+    # Path authority moved to gui_runtime.json. Drop the former path section
+    # when the activity log is next saved; retain all log entries untouched.
+    if settings.has_section('paths'):
+        settings.remove_section('paths')
     if not settings.has_section(LOG_SECTION):
         settings.add_section(LOG_SECTION)
     return settings
@@ -496,7 +565,8 @@ def _describe_database(db_path, label):
 
 
 def generate_diagnostic_report(source_field_value, archive_field_value, log_entries=None,
-                               test_folder_value=''):
+                               test_folder_value='', inventory_database_path=None,
+                               runtime_config=None):
     """
     Builds a plain-text diagnostic report: environment info, the current
     Source/Archive field values, every configured tool's script/config
@@ -526,8 +596,8 @@ def generate_diagnostic_report(source_field_value, archive_field_value, log_entr
     lines.append("")
 
     lines.append("-- Current GUI fields --")
-    lines.append(f"Test folder: {test_folder_value or '(empty)'}")
     if test_folder_value:
+        lines.append(f"Test folder: {test_folder_value}")
         lines.append(f"  exists: {Path(test_folder_value).exists()}")
     lines.append(f"Source folder: {source_field_value or '(empty)'}")
     if source_field_value:
@@ -535,6 +605,9 @@ def generate_diagnostic_report(source_field_value, archive_field_value, log_entr
     lines.append(f"Archive folder: {archive_field_value or '(empty)'}")
     if archive_field_value:
         lines.append(f"  exists: {Path(archive_field_value).exists()}")
+    lines.append(f"Inventory database: {inventory_database_path or '(default: located_files.db)'}")
+    if inventory_database_path:
+        lines.append(f"  exists: {Path(inventory_database_path).exists()}")
     lines.append("")
 
     lines.append("-- Recent Activity (from gui_settings.ini's rolling log) --")
@@ -554,14 +627,18 @@ def generate_diagnostic_report(source_field_value, archive_field_value, log_entr
             lines.append(_describe_tool_config(tool_name, tool_entry))
             lines.append("")
 
+    runtime_tools = (runtime_config or {}).get('tools', {})
+    if runtime_tools:
+        lines.append("-- Active central runtime settings --")
+        for tool_name in ('indexer', 'importer'):
+            if tool_name in runtime_tools:
+                lines.append(f"{tool_name}: {json.dumps(runtime_tools[tool_name], sort_keys=True)}")
+        lines.append("")
+
     lines.append("-- Databases --")
-    located_db_path = "located_files.db"  # conventional default, overridden below if configured differently
-    if config and 'indexer' in config.get('tools', {}):
-        try:
-            with open(PROJECT_ROOT / config['tools']['indexer']['config']) as f:
-                located_db_path = json.load(f).get('database_path', located_db_path)
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
+    located_db_path = inventory_database_path or "located_files.db"
+    if not inventory_database_path:
+        located_db_path = runtime_tools.get('indexer', {}).get('database_path', located_db_path)
     lines.append(_describe_database(located_db_path, "located_files.db"))
     lines.append("")
 

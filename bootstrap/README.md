@@ -26,15 +26,29 @@ You can pass the two folder paths as options:
 ```
 
 If either option is omitted, the initializer asks for that path in the
-terminal. The source folder must already exist and be readable. The archive
-destination is created if needed and tested with a temporary write. Successful
-paths are saved to the GUI's personal `gui/gui_settings.ini` so they appear as
-the last-used Source and Archive paths when the GUI opens.
+terminal. Press Enter at either prompt to skip that path independently. A
+provided Source folder must already exist and be readable. A provided Archive
+destination is created if needed and tested with a temporary write. Only paths
+that are provided are validated and saved to the GUI's personal
+`gui/gui_runtime.json`; a skipped path keeps its prior value, or stays blank on
+a fresh setup. Other runtime settings are preserved.
+
+To run dependency checks without selecting or changing paths, use:
+
+```bash
+./bootstrap/bootstrap.sh --skip-paths
+```
+
+On a fresh setup, the runtime template leaves Source and Archive blank. With an
+existing runtime file, `--skip-paths` preserves its saved paths. This option
+does not prompt for folders or create the Archive destination. Without this
+option, the two prompts can also be skipped separately by pressing Enter.
 
 This is not yet a complete first-run pipeline setup. The saved paths are not
-currently synchronized to every tool's database and report configuration, and
-the initializer exits after saving instead of launching the GUI. The GUI still
-uses its Test folder workflow to update those tool configurations.
+currently synchronized by the initializer to every tool's database and report
+configuration. Indexer and Importer read their sections from the central runtime
+file; for other stages, the GUI updates the module configs they still consume
+before launch. The initializer exits after saving instead of launching the GUI.
 
 ## What initialization checks
 
@@ -71,13 +85,16 @@ initializer manually after installing Python 3.8 or newer:
 py bootstrap\initialize.py --source-root "D:\Photos" --archive-root "E:\ChronoVault"
 ```
 
+Pass `--skip-paths` instead to check dependencies without prompting for or
+changing the saved Source and Archive paths.
+
 ## Files
 
 | File | Purpose |
 |---|---|
 | `bootstrap.sh` | Python runtime check and launcher for Linux/macOS. |
 | `bootstrap.bat` | Placeholder for a future native Windows runtime check and launcher. |
-| `initialize.py` | Dependency checks, source/archive prompts and access checks, and GUI path persistence. |
+| `initialize.py` | Dependency checks, optional source/archive prompts and access checks, and central runtime path persistence. |
 
 This is setup assistance, not an installer. For dependency details, see the
 root README and the relevant tool README files.

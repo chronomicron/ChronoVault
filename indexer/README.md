@@ -47,7 +47,8 @@ A archive that fails to open (corrupted, incomplete, not actually the format its
 
 ## Usage
 
-Run Indexer from the terminal, from the `ChronoVault/` project root:
+Run Indexer from the terminal, from the `ChronoVault/` project root, using a
+standalone tool config:
 
 ```
 python3 indexer/indexer.py indexer/config.json /path/to/search
@@ -55,9 +56,22 @@ python3 indexer/indexer.py indexer/config.json /path/to/search
 
 **Arguments:**
 
-1. Path to the JSON config file (tells Indexer what to look for and where to store results)
+1. Path to a standalone Indexer JSON config or the GUI runtime JSON file
 2. Top-level path to search — Indexer will recurse into every subfolder beneath this path
 3. `--allow-archive-source` (optional) — see **Safety Check: Refusing to Index an Existing Archive**, below
+
+The GUI currently passes `gui/gui_runtime.json` as the first argument. For that
+central format, Indexer reads its settings from `tools.indexer`; the scan root
+remains the second, positional argument. Standalone configs keep their existing
+top-level shape and continue to work unchanged. For example:
+
+```
+python3 indexer/indexer.py gui/gui_runtime.json /path/to/search
+```
+
+The shared `config_loader.py` selects the requested tool section only when the
+file has the central runtime structure (`schema_version`, `gui`, and `tools`).
+Otherwise, it returns the standalone top-level config object.
 
 **Example:**
 
@@ -66,6 +80,12 @@ python3 indexer/indexer.py indexer/config.json ~/Pictures
 ```
 
 This searches everything under `~/Pictures`, recursively, and logs any matching files into the database specified in `config.json`.
+
+## Stopping a Scan
+
+Indexer handles `SIGINT` and `SIGTERM` as cooperative stop requests. The signal handler only records the request; Indexer stops at the next directory/file checkpoint, persists its pending discovered rows, closes the database, prints discovered/inserted/skipped counts, and exits with `128 + signal number` (`130` for `SIGINT`, `143` for `SIGTERM`). A rerun is safe because existing file paths are skipped.
+
+Media rows are committed in batches of 100 while the walk is in progress. Archive locations are also written in bounded batches; when optional member listing is enabled, Indexer checks for a stop request before starting each listing. A filesystem operation or an archive-member listing already in progress may delay the stop until that operation returns. Indexer does not claim instant cancellation while such work is blocked.
 
 ## Startup Preflight Checks
 

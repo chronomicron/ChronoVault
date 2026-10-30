@@ -1,0 +1,102 @@
+{
+    "schema_version": 1,
+    "gui": {
+        "source_folder": "",
+        "archive_folder": "",
+        "test_folder": "",
+        "prepare_classify_images": true,
+        "prepare_try_ocr": false
+    },
+    "tools": {
+        "indexer": {
+            "database_path": "located_files.db",
+            "extensions": [
+                "jpg",
+                "jpeg",
+                "bmp",
+                "tif",
+                "tiff",
+                "png",
+                "gif",
+                "webp",
+                "thm",
+                "mp4",
+                "mov",
+                "raw",
+                "cr2",
+                "arw"
+            ],
+            "archive_extensions": [
+                "zip",
+                "tar",
+                "tar.gz",
+                "tgz",
+                "iso"
+            ],
+            "look_inside_archives": false
+        },
+        "classify_media": {
+            "database_path": "located_files.db",
+            "output_report_path": "reports/classification_report.json",
+            "image_extensions": [
+                "jpg",
+                "jpeg",
+                "bmp",
+                "tif",
+                "tiff",
+                "png",
+                "gif",
+                "webp",
+                "thm"
+            ],
+            "exclude_categories": [
+                "certain_not"
+            ],
+            "force_reclassify": false
+        },
+        "condition_database": {
+            "database_path": "located_files.db",
+            "output_report_path": "reports/condition_report.json",
+            "mismatch_threshold_days": 1,
+            "try_ocr": false
+        },
+        "importer": {
+            "database_path": "located_files.db",
+            "archive_root": "archive",
+            "extensions_to_copy": [
+                "jpg",
+                "jpeg",
+                "bmp",
+                "tif",
+                "tiff",
+                "png",
+                "gif",
+                "webp",
+                "thm",
+                "mp4",
+                "mov"
+            ],
+            "min_file_size_bytes": 0,
+            "max_file_size_bytes": 524288000,
+            "require_exif": false,
+            "exclude_path_contains": [
+                ".config",
+                "cache"
+            ]
+        },
+        "audit_archive": {
+            "archive_root": "archive",
+            "extensions": [],
+            "output_path": "reports/audit_result.json"
+        },
+        "duplicate_finder": {
+            "mode": "archive",
+            "archive_root": "archive",
+            "output_path": "reports/duplicate_report.json",
+            "database_path": "located_files.db"
+        },
+        "test_retrieve_data": {
+            "archive_root": "archive"
+        }
+    }
+}

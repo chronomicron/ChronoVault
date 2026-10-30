@@ -33,7 +33,13 @@ Run Importer from the terminal, from the `ChronoVault/` project root:
 python3 importer/importer.py importer/config.json
 ```
 
-Importer takes a single argument: the path to its config file. Everything else — the database location, the archive location, and all filtering behavior — is controlled through that file.
+Importer takes a single argument: the path to its config file. Everything else — the database location, the archive location, and all filtering behavior — is controlled through that file. It accepts either this standalone top-level config or the GUI runtime file, where it reads `tools.importer`:
+
+```bash
+python3 importer/importer.py gui/gui_runtime.json
+```
+
+The standalone config remains supported. Both forms use the same field names and value types. The GUI selects the central form so its Import extensions and filters apply to the running tool.
 
 ## Configuration (`config.json`)
 

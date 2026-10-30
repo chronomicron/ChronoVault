@@ -1,292 +1,640 @@
-"""
-gui/chronovault_gui.py
+"""ChronoVault's Qt workflow interface.
 
-ChronoVault GUI, v0.1 -- a simple window with buttons that launch the
-existing terminal tools (Indexer, Importer) and stream their output live,
-rather than replacing or duplicating any of their logic. Every tool is
-launched exactly as chronovault.sh already launches it: same scripts,
-same config.json files, same working directory (the project root) --
-this is a convenience layer, not a second way of running ChronoVault
-that could drift out of sync with the terminal-based one.
-
-v0.1 scope, deliberately minimal: Index and Import only. No Stop button
-yet (needs indexer.py's batch-commit fix first, so interrupting actually
-preserves partial progress). No Verify Status yet (needs the shared
-expected-keys list that will also drive the future --init flag, so the
-two don't silently disagree about what "correct" looks like). Both are
-natural next additions once this proves out.
-
-Requirements:
-    pip install PySide6 --break-system-packages
-
-Usage:
-    python3 chronovault.py          (from the project root -- recommended)
-    python3 gui/chronovault_gui.py  (equivalent, works from any directory)
+The GUI configures and launches the existing command-line tools. Pipeline
+behavior stays in those tools; this module owns workflow presentation, current
+path selections, and subprocess status/output.
 """
 
-import sys
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 
 try:
-    from PySide6.QtCore import QProcess
+    from PySide6.QtCore import QProcess, Qt
+    from PySide6.QtGui import QPalette
     from PySide6.QtWidgets import (
-        QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-        QLabel, QLineEdit, QPushButton, QPlainTextEdit, QFileDialog,
-        QMessageBox, QFrame
+        QApplication, QCheckBox, QFileDialog, QFrame, QGridLayout, QGroupBox,
+        QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
+        QPlainTextEdit, QPushButton, QSpinBox,
+        QTabWidget, QVBoxLayout, QWidget,
     )
 except ImportError:
     print("ERROR: PySide6 is not installed.")
     print("Install it with:  pip install PySide6 --break-system-packages")
     sys.exit(1)
 
-# gui_data.py has no PySide6 dependency at all -- kept separate specifically
-# so its logic is testable without Qt installed. See that file's docstring.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gui_data import (
-    load_gui_config, update_archive_root_in_config, check_looks_like_archive,
-    check_folder_writable, check_archive_destination, load_settings, save_settings,
-    check_and_log_startup, log_clean_shutdown, append_log_entry, get_log_entries,
-    generate_diagnostic_report, configure_test_folder, get_test_folder_paths,
-    PROJECT_ROOT, GUI_SETTINGS_PATH
+    PROJECT_ROOT, GUI_RUNTIME_PATH, append_log_entry, check_and_log_startup,
+    check_archive_destination, check_looks_like_archive,
+    generate_diagnostic_report, get_log_entries,
+    load_gui_config, load_gui_runtime, load_settings, save_gui_runtime,
+    save_settings, update_gui_runtime_paths, update_values_in_config,
 )
+
+
+MEDIA_TYPES = {
+    "Photos": ("jpg", "jpeg", "bmp", "tif", "tiff", "png", "gif", "webp", "thm", "raw", "cr2", "arw"),
+    "Videos": ("mp4", "mov", "avi", "mkv", "mpeg", "mpg", "3gp", "mts", "m2ts"),
+    "Audio": ("mp3", "m4a", "wav", "flac", "ogg", "aac", "wma"),
+}
+IMAGE_EXTENSIONS = set(MEDIA_TYPES["Photos"])
 
 
 class ChronoVaultWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ChronoVault")
-        self.resize(820, 600)
-
-        self.gui_config = load_gui_config()
-        self.gui_config_load_failed = self.gui_config is None
-        if self.gui_config is None:
-            # load_gui_config() already printed why to the terminal. The
-            # visible dialog happens in main(), right after the window is
-            # shown -- QMessageBox needs a window to exist first.
-            self.gui_config = {"tools": {}}
-
+        self.setWindowTitle("ChronoVault — Archive workflow")
+        self.resize(1120, 900)
+        self.gui_config = load_gui_config() or {"tools": {}}
+        self.gui_config_load_failed = not bool(self.gui_config.get("tools"))
+        self.runtime_config = load_gui_runtime()
+        save_gui_runtime(self.runtime_config)
         self.settings = load_settings()
         self.previous_session_crashed = check_and_log_startup(self.settings)
         save_settings(self.settings)
-
-        self.process = None  # the currently-running QProcess, if any -- None means idle
-
+        self.process = None
+        self.process_queue = []
+        self.active_tool_name = ""
+        self._stdout_event_buffer = ""
         self._build_ui()
         self._restore_settings()
+        self._connect_setting_signals()
+        self._save_settings()
 
     def _build_ui(self):
-        central = QWidget()
-        outer_layout = QHBoxLayout(central)
+        checkmark_path = (Path(__file__).resolve().parent / "checkbox-check.svg").as_posix()
+        self.setStyleSheet("""
+            QMainWindow, QWidget#root, QWidget#workflowPage, QWidget#reviewPage,
+            QWidget#settingsPage, QWidget#settingsSubpage { background: #f3f6fb; color: #202b3b; }
+            QWidget { color: #202b3b; }
+            QLabel { color: #202b3b; background: transparent; }
+            QLabel#muted, QLabel#summary { color: #526176; }
+            QLabel#appMark { background: #e7efff; color: #315eae; border-radius: 8px; padding: 5px 9px; font-weight: 700; }
+            QLabel#statusPill { background: #e4f6ec; color: #236b4a; border: 1px solid #bfdfce; border-radius: 10px; padding: 5px 10px; }
+            QGroupBox { background: #ffffff; color: #202b3b; border: 1px solid #d8e0ec; border-radius: 9px; margin-top: 12px; padding: 10px; font-weight: 600; }
+            QGroupBox::title { color: #344257; subcontrol-origin: margin; left: 11px; padding: 0 5px; }
+            QLineEdit, QSpinBox { background: #ffffff; color: #202b3b; selection-background-color: #315eae; selection-color: #ffffff; border: 1px solid #b9c6d8; border-radius: 5px; padding: 6px; }
+            QLineEdit::placeholder { color: #68778c; }
+            QCheckBox { color: #263449; spacing: 7px; background: transparent; }
+            QCheckBox::indicator { width: 15px; height: 15px; border: 1px solid #7889a0; border-radius: 3px; background: #ffffff; }
+            QCheckBox::indicator:checked { background: #315eae; border-color: #315eae; image: url("__CHECKMARK__"); }
+            QPushButton { background: #ffffff; color: #263449; border: 1px solid #bfcbda; border-radius: 6px; padding: 7px 11px; }
+            QPushButton:hover { background: #edf2f8; color: #172338; border-color: #8798ad; }
+            QPushButton:disabled { background: #e9edf2; color: #536176; border-color: #c5ced9; }
+            QPushButton#primaryIndex { background: #315eae; color: #ffffff; border-color: #315eae; font-weight: 600; }
+            QPushButton#primaryPrepare { background: #7355b8; color: #ffffff; border-color: #7355b8; font-weight: 600; }
+            QPushButton#primaryImport { background: #168b9a; color: #ffffff; border-color: #168b9a; font-weight: 600; }
+            QPushButton#primaryVerify { background: #a85d14; color: #ffffff; border-color: #a85d14; font-weight: 600; }
+            QPushButton#linkButton { color: #315eae; background: transparent; border-color: transparent; }
+            QTabWidget::pane { background: #f3f6fb; border: 1px solid #d8e0ec; border-radius: 8px; top: -1px; }
+            QTabBar::tab { background: #e9eef5; color: #48576c; border: 1px solid #d8e0ec; padding: 8px 15px; margin-right: 4px; border-top-left-radius: 6px; border-top-right-radius: 6px; }
+            QTabBar::tab:selected { background: #ffffff; color: #202b3b; font-weight: 600; border-bottom-color: #ffffff; }
+            QPlainTextEdit { background: #17232d; color: #e8eef3; selection-background-color: #315eae; selection-color: #ffffff; border: 1px solid #263846; border-radius: 7px; padding: 8px; font-family: monospace; }
+            QToolTip { background: #202b3b; color: #ffffff; border: 1px solid #526176; padding: 4px; }
+            QFrame#workspaceTile { background: #ffffff; border: 1px solid #d8e0ec; border-radius: 8px; }
+            QFrame#stageIndex { background: #f5f8ff; border: 1px solid #d2def4; border-top: 4px solid #315eae; border-radius: 9px; }
+            QFrame#stagePrepare { background: #faf7ff; border: 1px solid #e0d6f2; border-top: 4px solid #7355b8; border-radius: 9px; }
+            QFrame#stageImport { background: #f2fbfc; border: 1px solid #c9e8eb; border-top: 4px solid #168b9a; border-radius: 9px; }
+            QFrame#stageVerify { background: #fff9f1; border: 1px solid #efddc8; border-top: 4px solid #b66a1b; border-radius: 9px; }
+            QFrame#pathGuidance { background: #fff4dc; color: #714b0f; border: 1px solid #ead29c; border-radius: 8px; }
+            QLabel#warningText { color: #714b0f; }
+        """.replace("__CHECKMARK__", checkmark_path))
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Window, self._qcolor("#f3f6fb"))
+        palette.setColor(QPalette.ColorRole.WindowText, self._qcolor("#202b3b"))
+        palette.setColor(QPalette.ColorRole.Base, self._qcolor("#ffffff"))
+        palette.setColor(QPalette.ColorRole.AlternateBase, self._qcolor("#edf1f8"))
+        palette.setColor(QPalette.ColorRole.Text, self._qcolor("#202b3b"))
+        palette.setColor(QPalette.ColorRole.Button, self._qcolor("#ffffff"))
+        palette.setColor(QPalette.ColorRole.ButtonText, self._qcolor("#263449"))
+        palette.setColor(QPalette.ColorRole.Highlight, self._qcolor("#315eae"))
+        palette.setColor(QPalette.ColorRole.HighlightedText, self._qcolor("#ffffff"))
+        palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, self._qcolor("#526176"))
+        palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, self._qcolor("#526176"))
+        palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, self._qcolor("#536176"))
+        palette.setColor(QPalette.ColorRole.PlaceholderText, self._qcolor("#68778c"))
+        self.setPalette(palette)
+        QApplication.instance().setPalette(palette)
 
-        # --- Left column: the main pipeline flow (unchanged from before) ---
-        left_widget = QWidget()
-        layout = QVBoxLayout(left_widget)
-        layout.setContentsMargins(0, 0, 0, 0)
+        root = QWidget()
+        root.setObjectName("root")
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(20, 14, 20, 14)
+        outer.setSpacing(10)
+        topbar = QHBoxLayout()
+        mark = QLabel("CV")
+        mark.setObjectName("appMark")
+        brand = QLabel("ChronoVault")
+        brand.setStyleSheet("font-size: 18px; font-weight: 700;")
+        self.status_label = QLabel("Ready")
+        self.status_label.setObjectName("statusPill")
+        topbar.addWidget(mark)
+        topbar.addWidget(brand)
+        topbar.addStretch(1)
+        self.stop_condition_button = QPushButton("Stop conditioning")
+        self.stop_condition_button.setVisible(False)
+        self.stop_condition_button.setEnabled(False)
+        self.stop_condition_button.clicked.connect(self._request_condition_stop)
+        topbar.addWidget(self.stop_condition_button)
+        topbar.addWidget(self.status_label)
+        outer.addLayout(topbar)
 
-        # --- Test workspace row ---
-        test_folder_row = QHBoxLayout()
-        test_folder_row.addWidget(QLabel("Test folder:"))
-        self.test_folder_field = QLineEdit()
-        self.test_folder_field.setPlaceholderText("Root folder containing this test run's data, archive, and reports")
-        self.test_folder_field.editingFinished.connect(self._apply_test_folder_from_field)
-        test_folder_row.addWidget(self.test_folder_field)
-        test_folder_browse = QPushButton("Browse…")
-        test_folder_browse.clicked.connect(self._browse_test_folder)
-        test_folder_row.addWidget(test_folder_browse)
-        layout.addLayout(test_folder_row)
+        self.main_tabs = QTabWidget()
+        self.main_tabs.addTab(self._build_workflow_view(), "Workflow")
+        self.main_tabs.addTab(self._build_review_view(), "Review")
+        self.main_tabs.addTab(self._build_settings_view(), "Settings")
+        outer.addWidget(self.main_tabs, 3)
 
-        # --- Source folder row ---
-        source_row = QHBoxLayout()
-        source_row.addWidget(QLabel("Source folder:"))
-        self.source_field = QLineEdit()
-        self.source_field.setPlaceholderText("Folder to search and index (e.g. an old drive, USB key, phone backup)")
-        self.source_field.editingFinished.connect(self._save_path_fields)
-        source_row.addWidget(self.source_field)
-        source_browse = QPushButton("Browse…")
-        source_browse.clicked.connect(self._browse_source)
-        source_row.addWidget(source_browse)
-        layout.addLayout(source_row)
-
-        # --- Archive folder row ---
-        archive_row = QHBoxLayout()
-        archive_row.addWidget(QLabel("Archive folder:"))
-        self.archive_field = QLineEdit()
-        self.archive_field.setPlaceholderText("Where ChronoVault builds the dated archive")
-        self.archive_field.editingFinished.connect(self._save_path_fields)
-        archive_row.addWidget(self.archive_field)
-        archive_browse = QPushButton("Browse…")
-        archive_browse.clicked.connect(self._browse_archive)
-        archive_row.addWidget(archive_browse)
-        layout.addLayout(archive_row)
-
-        # Keep first-run guidance inside the window rather than interrupting
-        # startup with a modal dialog. Each chooser appears only for a path
-        # that is missing or cannot currently be used.
-        self.path_guidance = QFrame()
-        self.path_guidance.setFrameShape(QFrame.Shape.StyledPanel)
-        guidance_layout = QVBoxLayout(self.path_guidance)
-        self.path_guidance_label = QLabel()
-        self.path_guidance_label.setWordWrap(True)
-        guidance_layout.addWidget(self.path_guidance_label)
-        guidance_buttons = QHBoxLayout()
-        self.guidance_source_button = QPushButton("Choose Source Folder…")
-        self.guidance_source_button.clicked.connect(self._browse_source)
-        guidance_buttons.addWidget(self.guidance_source_button)
-        self.guidance_archive_button = QPushButton("Choose Archive Folder…")
-        self.guidance_archive_button.clicked.connect(self._browse_archive)
-        guidance_buttons.addWidget(self.guidance_archive_button)
-        guidance_buttons.addStretch(1)
-        guidance_layout.addLayout(guidance_buttons)
-        layout.addWidget(self.path_guidance)
-
-        # --- Action buttons ---
-        action_row = QHBoxLayout()
-        self.index_button = QPushButton("Index")
-        self.index_button.clicked.connect(self._run_indexer)
-        action_row.addWidget(self.index_button)
-
-        self.import_button = QPushButton("Import")
-        self.import_button.clicked.connect(self._run_importer)
-        action_row.addWidget(self.import_button)
-
-        action_row.addStretch(1)
-        layout.addLayout(action_row)
-
-        # --- Status line ---
-        self.status_label = QLabel("Ready.")
-        layout.addWidget(self.status_label)
-
-        # --- Output panel: read-only, monospace, terminal-output feel ---
         self.output_panel = QPlainTextEdit()
         self.output_panel.setReadOnly(True)
-        self.output_panel.setStyleSheet("font-family: monospace;")
-        layout.addWidget(self.output_panel, stretch=1)
+        self.output_panel.setPlaceholderText("Tool output will appear here.")
+        self.output_panel.setMinimumHeight(190)
+        outer.addWidget(self.output_panel, 2)
+        self.setCentralWidget(root)
 
-        outer_layout.addWidget(left_widget, 1)  # stretch factor 1 -- takes the remaining width
+    @staticmethod
+    def _qcolor(value):
+        from PySide6.QtGui import QColor
+        return QColor(value)
 
-        # --- Right column: narrow panel of additional tool/test buttons.
-        # Deliberately separate from the main Index/Import flow above --
-        # this is where every other tool (Condition Database, Audit
-        # Archive, Duplicate Finder today; test_functions scripts later)
-        # gets a button as it's wired in, without reworking the main
-        # flow's layout each time. Fixed narrow width, buttons stacked
-        # top to bottom, extra vertical space absorbed by the stretch at
-        # the end so buttons cluster together rather than spreading out.
-        right_widget = QWidget()
-        right_widget.setMaximumWidth(170)
-        right_layout = QVBoxLayout(right_widget)
+    def _build_workflow_view(self):
+        page = QWidget()
+        page.setObjectName("workflowPage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(9)
+        intro = QHBoxLayout()
+        titles = QVBoxLayout()
+        title = QLabel("Archive workflow")
+        title.setStyleSheet("font-size: 20px; font-weight: 650;")
+        subtitle = QLabel("Add a source drive to your ChronoVault archive.")
+        subtitle.setObjectName("muted")
+        titles.addWidget(title)
+        titles.addWidget(subtitle)
+        intro.addLayout(titles)
+        intro.addStretch(1)
+        self.workflow_report_button = QPushButton("Run report")
+        self.workflow_report_button.clicked.connect(self._run_diagnostic_report)
+        intro.addWidget(self.workflow_report_button)
+        layout.addLayout(intro)
 
-        right_layout.addWidget(QLabel("Tools"))
+        self.workspace_group = QWidget()
+        paths = QHBoxLayout(self.workspace_group)
+        paths.setContentsMargins(0, 0, 0, 0)
+        paths.setSpacing(9)
+        self.source_path_summary, source_tile = self._path_tile("Source drive", self._browse_source)
+        self.archive_path_summary, archive_tile = self._path_tile("Archive destination", self._browse_archive)
+        self.database_path_summary, database_tile = self._path_tile("Inventory database", self._browse_database)
+        paths.addWidget(source_tile, 1)
+        paths.addWidget(archive_tile, 1)
+        paths.addWidget(database_tile, 1)
+        layout.addWidget(self.workspace_group)
 
-        self.classify_button = QPushButton("Classify Media")
-        self.classify_button.clicked.connect(self._run_classify_media)
-        right_layout.addWidget(self.classify_button)
+        self.path_guidance = QFrame()
+        self.path_guidance.setObjectName("pathGuidance")
+        guidance = QHBoxLayout(self.path_guidance)
+        guidance.setContentsMargins(10, 6, 10, 6)
+        self.path_guidance_label = QLabel()
+        self.path_guidance_label.setObjectName("warningText")
+        self.path_guidance_label.setWordWrap(True)
+        guidance.addWidget(self.path_guidance_label, 1)
+        self.guidance_source_button = QPushButton("Choose Source…")
+        self.guidance_source_button.clicked.connect(self._browse_source)
+        self.guidance_archive_button = QPushButton("Choose Archive…")
+        self.guidance_archive_button.clicked.connect(self._browse_archive)
+        guidance.addWidget(self.guidance_source_button)
+        guidance.addWidget(self.guidance_archive_button)
+        layout.addWidget(self.path_guidance)
 
-        self.condition_button = QPushButton("Condition Database")
-        self.condition_button.clicked.connect(self._run_condition_database)
-        right_layout.addWidget(self.condition_button)
+        sequence = QLabel("1  Index source     ─────     2  Prepare inventory     ─────     3  Import selected files     ─────     4  Verify archive")
+        sequence.setObjectName("muted")
+        sequence.setStyleSheet("font-weight: 600; padding: 2px;")
+        layout.addWidget(sequence)
 
-        self.audit_button = QPushButton("Audit Archive")
-        self.audit_button.clicked.connect(self._run_audit_archive)
-        right_layout.addWidget(self.audit_button)
+        stages = QGridLayout()
+        stages.setHorizontalSpacing(10)
+        stages.setVerticalSpacing(10)
+        stages.setColumnStretch(0, 1)
+        stages.setColumnStretch(1, 1)
+        self.index_group, self.index_summary = self._stage_card(
+            "01", "Index source", "Record paths and file details from Source.",
+            "Selected types: updating", "Index source", self._run_indexer,
+            "Settings", lambda: self._open_stage_settings(1), "stageIndex", "primaryIndex")
+        self.prepare_group, self.prepare_summary = self._stage_card(
+            "02", "Prepare inventory", "Classify images, hash files, and analyze dates.",
+            "Classify: on · OCR: off", "Prepare inventory", self._run_prepare,
+            "Options", lambda: self._open_stage_settings(2), "stagePrepare", "primaryPrepare")
+        self.import_group, self.import_summary = self._stage_card(
+            "03", "Import selected files", "Copy selected inventory files into Archive.",
+            "Selected types: updating", "Import selected files", self._run_importer,
+            "Settings", lambda: self._open_stage_settings(3), "stageImport", "primaryImport")
+        self.verify_group, self.verify_summary = self._stage_card(
+            "04", "Verify archive", "Compare archive files with its database.",
+            "Report only · no files moved", "Run archive audit", self._run_audit_archive,
+            "Archive settings", lambda: self._open_stage_settings(0), "stageVerify", "primaryVerify")
+        stages.addWidget(self.index_group, 0, 0)
+        stages.addWidget(self.prepare_group, 0, 1)
+        stages.addWidget(self.import_group, 1, 0)
+        stages.addWidget(self.verify_group, 1, 1)
+        layout.addLayout(stages)
 
-        self.duplicate_button = QPushButton("Duplicate Finder")
+        callout = QLabel("Your source files stay where they are. Import copies selected files into the archive.")
+        callout.setStyleSheet("background: #fff4dc; color: #714b0f; border-radius: 7px; padding: 8px 10px;")
+        layout.addWidget(callout)
+        return page
+
+    def _path_tile(self, heading, callback):
+        tile = QFrame()
+        tile.setObjectName("workspaceTile")
+        layout = QVBoxLayout(tile)
+        layout.setContentsMargins(10, 6, 10, 6)
+        row = QHBoxLayout()
+        label = QLabel(heading)
+        label.setStyleSheet("font-weight: 650;")
+        button = QPushButton("Change")
+        button.setObjectName("linkButton")
+        button.clicked.connect(callback)
+        row.addWidget(label)
+        row.addStretch(1)
+        row.addWidget(button)
+        self.path_values = getattr(self, "path_values", [])
+        value = QLabel("")
+        value.setObjectName("muted")
+        value.setWordWrap(True)
+        value.setTextInteractionFlags(value.textInteractionFlags() | Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addLayout(row)
+        layout.addWidget(value)
+        self.path_values.append(value)
+        return value, tile
+
+    def _stage_card(self, number, title, description, summary, run_text, run_callback,
+                    settings_text, settings_callback, frame_name, button_name):
+        card = QFrame()
+        card.setObjectName(frame_name)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(12, 7, 12, 7)
+        layout.setSpacing(3)
+        heading = QHBoxLayout()
+        number_label = QLabel(number)
+        number_label.setStyleSheet("font-size: 12px; font-weight: 700;")
+        title_label = QLabel(title)
+        title_label.setStyleSheet("font-size: 15px; font-weight: 650;")
+        heading.addWidget(number_label)
+        heading.addWidget(title_label)
+        heading.addStretch(1)
+        layout.addLayout(heading)
+        description_label = QLabel(description)
+        description_label.setObjectName("muted")
+        description_label.setWordWrap(True)
+        layout.addWidget(description_label)
+        summary_label = QLabel(summary)
+        summary_label.setObjectName("summary")
+        summary_label.setWordWrap(True)
+        layout.addWidget(summary_label)
+        actions = QHBoxLayout()
+        run_button = QPushButton(run_text)
+        run_button.setObjectName(button_name)
+        run_button.clicked.connect(run_callback)
+        settings_button = QPushButton(settings_text)
+        settings_button.setObjectName("linkButton")
+        settings_button.clicked.connect(settings_callback)
+        actions.addWidget(run_button)
+        actions.addWidget(settings_button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+        return card, summary_label
+
+    def _build_review_view(self):
+        page = QWidget()
+        page.setObjectName("reviewPage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(18, 15, 18, 15)
+        layout.setSpacing(10)
+        title = QLabel("After import")
+        title.setStyleSheet("font-size: 19px; font-weight: 650;")
+        layout.addWidget(title)
+        note = QLabel("Review and analysis tools keep their own safety behavior. They do not delete or choose files.")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        actions = QHBoxLayout()
+        self.duplicate_button = QPushButton("Find duplicate groups")
         self.duplicate_button.clicked.connect(self._run_duplicate_finder)
-        right_layout.addWidget(self.duplicate_button)
-
-        # Section separator -- groups form as more tools get wired in.
-        # Above: the main pipeline tools (all act on located_files.db
-        # and/or the archive). Below: diagnostics (read-only, no
-        # pipeline data touched).
-        separator = QFrame()
-        separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setFrameShadow(QFrame.Shadow.Sunken)
-        right_layout.addWidget(separator)
-
-        right_layout.addWidget(QLabel("Diagnostics"))
-
-        self.test_env_button = QPushButton("Test Environment")
+        self.review_button = QPushButton("Review uncertain dates")
+        self.review_button.clicked.connect(self._run_review_data)
+        actions.addWidget(self.duplicate_button)
+        actions.addWidget(self.review_button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+        details = QLabel("Duplicate Finder reports matching hashes and may cache hashes in the archive database. Review lists uncertain-date rows through the existing read-only diagnostic.")
+        details.setObjectName("muted")
+        details.setWordWrap(True)
+        layout.addWidget(details)
+        report_row = QHBoxLayout()
+        self.test_env_button = QPushButton("Check environment")
         self.test_env_button.clicked.connect(self._run_test_env)
-        right_layout.addWidget(self.test_env_button)
-
-        self.test_retrieve_button = QPushButton("Test Retrieve Data")
-        self.test_retrieve_button.clicked.connect(self._run_test_retrieve_data)
-        right_layout.addWidget(self.test_retrieve_button)
-
-        right_layout.addStretch(1)  # pushes the Utilities group below down to the bottom of the panel
-
-        # Second separator: below this, tools used only occasionally --
-        # generating test data is a one-off setup action, and a
-        # diagnostic report is only needed when something's gone wrong,
-        # neither is part of normal day-to-day running the way the
-        # Tools/Diagnostics groups above are.
-        separator2 = QFrame()
-        separator2.setFrameShape(QFrame.Shape.HLine)
-        separator2.setFrameShadow(QFrame.Shadow.Sunken)
-        right_layout.addWidget(separator2)
-
-        right_layout.addWidget(QLabel("Utilities"))
-
-        self.generate_test_data_button = QPushButton("Generate Test Data")
-        self.generate_test_data_button.clicked.connect(self._run_generate_test_data)
-        right_layout.addWidget(self.generate_test_data_button)
-
-        self.diagnostic_button = QPushButton("Generate Report")
+        self.diagnostic_button = QPushButton("Generate diagnostic report")
         self.diagnostic_button.clicked.connect(self._run_diagnostic_report)
-        right_layout.addWidget(self.diagnostic_button)
+        report_row.addWidget(self.test_env_button)
+        report_row.addWidget(self.diagnostic_button)
+        report_row.addStretch(1)
+        layout.addLayout(report_row)
+        layout.addStretch(1)
+        return page
 
-        outer_layout.addWidget(right_widget)
+    def _build_settings_view(self):
+        page = QWidget()
+        page.setObjectName("settingsPage")
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(12, 12, 12, 12)
+        self.settings_tabs = QTabWidget()
+        outer.addWidget(self.settings_tabs)
+        self._build_workspace_settings()
+        self._build_index_settings()
+        self._build_prepare_settings()
+        self._build_import_settings()
+        return page
 
-        self.setCentralWidget(central)
+    def _build_workspace_settings(self):
+        page = QWidget()
+        page.setObjectName("settingsSubpage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(12, 12, 12, 12)
+        self.workspace_settings_group = QGroupBox("Workspace locations")
+        grid = QGridLayout(self.workspace_settings_group)
+        grid.setColumnStretch(1, 1)
+        self.source_field = QLineEdit()
+        self.source_field.setPlaceholderText("Drive or folder to scan")
+        self.source_field.setToolTip("Indexer scans this drive or folder. Original source files are not moved or deleted.")
+        self.archive_field = QLineEdit()
+        self.archive_field.setPlaceholderText("Folder where imported files are stored")
+        self.archive_field.setToolTip("Future imports use this archive folder. Selecting a different folder does not move an existing archive.")
+        self.database_field = QLineEdit()
+        self.database_field.setPlaceholderText("Located-files inventory database")
+        self.database_field.setToolTip("Selecting another path does not move an existing database.")
+        self.source_field.editingFinished.connect(self._path_changed)
+        self.archive_field.editingFinished.connect(self._path_changed)
+        self.database_field.editingFinished.connect(self._database_path_changed)
+        for row, (label, field, callback) in enumerate((
+            ("Source folder", self.source_field, self._browse_source),
+            ("Archive destination", self.archive_field, self._browse_archive),
+            ("Inventory database", self.database_field, self._browse_database),
+        )):
+            grid.addWidget(QLabel(label), row, 0)
+            grid.addWidget(field, row, 1)
+            choose = QPushButton("Choose…")
+            choose.clicked.connect(callback)
+            grid.addWidget(choose, row, 2)
+        help_text = QLabel("Source files are read and copied. Changing Archive selects a destination; it does not relocate existing media.")
+        help_text.setObjectName("muted")
+        help_text.setWordWrap(True)
+        layout.addWidget(self.workspace_settings_group)
+        layout.addWidget(help_text)
+        layout.addStretch(1)
+        self.settings_tabs.addTab(page, "Workspace")
+
+    def _build_index_settings(self):
+        page = QWidget()
+        page.setObjectName("settingsSubpage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(12, 12, 12, 12)
+        self.index_type_group = self._extension_controls(layout, "index")
+        self.index_other_extensions = QLineEdit()
+        self.index_other_extensions.setPlaceholderText("Additional extensions, comma separated (example: heic, pdf)")
+        layout.addWidget(self.index_other_extensions)
+        self.index_archives_check = QCheckBox("List matching files inside ZIP/TAR/ISO archives")
+        layout.addWidget(self.index_archives_check)
+        note = QLabel("Indexer records locations and metadata. Listing archive contents does not extract files.")
+        note.setObjectName("muted")
+        layout.addWidget(note)
+        layout.addStretch(1)
+        self.settings_tabs.addTab(page, "Index")
+
+    def _build_prepare_settings(self):
+        page = QWidget()
+        page.setObjectName("settingsSubpage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(12, 12, 12, 12)
+        self.prepare_settings_group = QGroupBox("Preparation choices")
+        choices = QVBoxLayout(self.prepare_settings_group)
+        self.classify_check = QCheckBox("Classify supported images before conditioning")
+        self.classify_check.setChecked(True)
+        self.ocr_check = QCheckBox("Try OCR when image date signals are missing")
+        choices.addWidget(self.classify_check)
+        choices.addWidget(self.ocr_check)
+        note = QLabel("Condition Database hashes and analyzes every eligible inventory row. It does not filter by file type. OCR may take longer and requires its optional dependencies.")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        layout.addWidget(self.prepare_settings_group)
+        layout.addWidget(note)
+        layout.addStretch(1)
+        self.settings_tabs.addTab(page, "Prepare")
+
+    def _build_import_settings(self):
+        page = QWidget()
+        page.setObjectName("settingsSubpage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(12, 12, 12, 12)
+        self.import_type_group = self._extension_controls(layout, "import")
+        self.import_other_extensions = QLineEdit()
+        self.import_other_extensions.setPlaceholderText("Additional extensions, comma separated")
+        layout.addWidget(self.import_other_extensions)
+        self.import_advanced = QGroupBox("Import filters")
+        filters = QGridLayout(self.import_advanced)
+        self.min_size = QSpinBox()
+        self.min_size.setRange(0, 2_000_000_000)
+        self.min_size.setSuffix(" bytes minimum")
+        self.max_size = QSpinBox()
+        self.max_size.setRange(0, 2_000_000_000)
+        self.max_size.setSpecialValueText("No maximum")
+        self.max_size.setSuffix(" bytes maximum")
+        self.require_exif_check = QCheckBox("Require EXIF data")
+        self.exclude_thumbnails_check = QCheckBox("Skip thumbnail files")
+        self.exclude_thumbnails_check.setChecked(True)
+        self.excludes_field = QLineEdit()
+        self.excludes_field.setPlaceholderText("Excluded path fragments, comma separated")
+        filters.addWidget(self.min_size, 0, 0)
+        filters.addWidget(self.max_size, 0, 1)
+        filters.addWidget(self.require_exif_check, 1, 0)
+        filters.addWidget(self.exclude_thumbnails_check, 1, 1)
+        filters.addWidget(QLabel("Exclude paths"), 2, 0)
+        filters.addWidget(self.excludes_field, 2, 1)
+        layout.addWidget(self.import_advanced)
+        layout.addStretch(1)
+        self.settings_tabs.addTab(page, "Import")
+
+    def _open_stage_settings(self, index):
+        self.main_tabs.setCurrentIndex(2)
+        self.settings_tabs.setCurrentIndex(index)
+
+    def _connect_setting_signals(self):
+        for checkbox in (*self.index_extension_checks.values(), *self.import_extension_checks.values(),
+                          self.index_archives_check, self.classify_check, self.ocr_check,
+                          self.require_exif_check, self.exclude_thumbnails_check):
+            checkbox.toggled.connect(self._save_settings)
+        self.min_size.valueChanged.connect(self._save_settings)
+        self.max_size.valueChanged.connect(self._save_settings)
+        self.excludes_field.editingFinished.connect(self._save_settings)
+        self.index_other_extensions.editingFinished.connect(self._save_settings)
+        self.import_other_extensions.editingFinished.connect(self._save_settings)
+
+    @staticmethod
+    def _muted(text):
+        label = QLabel(text)
+        label.setObjectName("muted")
+        label.setWordWrap(True)
+        return label
+
+    def _extension_controls(self, parent_layout, kind):
+        group = QGroupBox("File types and extensions")
+        grid = QGridLayout(group)
+        controls = {}
+        row = 0
+        for category, extensions in MEDIA_TYPES.items():
+            grid.addWidget(QLabel(category), row, 0, 1, 4)
+            row += 1
+            for index, extension in enumerate(extensions):
+                check = QCheckBox(f".{extension}")
+                controls[extension] = check
+                grid.addWidget(check, row + index // 4, index % 4)
+            row += (len(extensions) + 3) // 4
+        parent_layout.addWidget(group)
+        setattr(self, f"{kind}_extension_checks", controls)
+        return group
+
+    def _extension_default_checks(self):
+        indexer = self.runtime_config["tools"]["indexer"]
+        importer = self.runtime_config["tools"].get("importer", {})
+        for extension, checkbox in self.index_extension_checks.items():
+            checkbox.setChecked(extension in {str(e).lower().lstrip(".") for e in indexer.get("extensions", [])})
+        for extension, checkbox in self.import_extension_checks.items():
+            checkbox.setChecked(extension in {str(e).lower().lstrip(".") for e in importer.get("extensions_to_copy", [])})
+        known = set(self.index_extension_checks)
+        self.index_other_extensions.setText(", ".join(str(e).lower().lstrip(".") for e in indexer.get("extensions", []) if str(e).lower().lstrip(".") not in known))
+        known = set(self.import_extension_checks)
+        self.import_other_extensions.setText(", ".join(str(e).lower().lstrip(".") for e in importer.get("extensions_to_copy", []) if str(e).lower().lstrip(".") not in known))
 
     def _restore_settings(self):
-        """Pre-fill fields from the last session, if gui_settings.ini exists. Purely a convenience -- never required."""
-        self.test_folder_field.setText(self.settings['paths'].get('test_folder', ''))
-        self.source_field.setText(self.settings['paths'].get('source_folder', ''))
-        self.archive_field.setText(self.settings['paths'].get('archive_folder', ''))
+        self._extension_default_checks()
+        gui = self.runtime_config["gui"]
+        self.source_field.setText(gui.get("source_folder", ""))
+        self.archive_field.setText(gui.get("archive_folder", ""))
+        self.classify_check.setChecked(bool(gui.get("prepare_classify_images", True)))
+        self.ocr_check.setChecked(bool(gui.get("prepare_try_ocr", False)))
+        self.database_field.setText(self.runtime_config["tools"]["indexer"].get("database_path", "located_files.db"))
+        indexer = self.runtime_config["tools"]["indexer"]
+        importer = self.runtime_config["tools"].get("importer", {})
+        self.index_archives_check.setChecked(bool(indexer.get("look_inside_archives", False)))
+        self.min_size.setValue(int(importer.get("min_file_size_bytes", 0) or 0))
+        self.max_size.setValue(int(importer.get("max_file_size_bytes", 0) or 0))
+        self.require_exif_check.setChecked(bool(importer.get("require_exif", False)))
+        self.exclude_thumbnails_check.setChecked(bool(importer.get("exclude_thumbnails", True)))
+        self.excludes_field.setText(", ".join(importer.get("exclude_path_contains", [])))
         self._update_path_guidance()
+        self._refresh_summaries()
+
+    def _database_path(self):
+        raw = self.database_field.text().strip() or "located_files.db"
+        path = Path(raw).expanduser()
+        return path if path.is_absolute() else PROJECT_ROOT / path
+
+    def _reports_folder(self):
+        return self._database_path().parent / "reports"
 
     def _save_settings(self):
-        self.settings['paths']['test_folder'] = self.test_folder_field.text()
-        self.settings['paths']['source_folder'] = self.source_field.text()
-        self.settings['paths']['archive_folder'] = self.archive_field.text()
-        save_settings(self.settings)
+        update_gui_runtime_paths(self.runtime_config, source_folder=self.source_field.text().strip(), archive_folder=self.archive_field.text().strip())
+        self.runtime_config["gui"]["prepare_classify_images"] = self.classify_check.isChecked()
+        self.runtime_config["gui"]["prepare_try_ocr"] = self.ocr_check.isChecked()
+        self.runtime_config["tools"]["indexer"]["database_path"] = self.database_field.text().strip() or "located_files.db"
+        self.runtime_config["tools"]["indexer"]["extensions"] = self._checked_extensions(self.index_extension_checks) + self._custom_extensions(self.index_other_extensions.text())
+        self.runtime_config["tools"]["indexer"]["look_inside_archives"] = self.index_archives_check.isChecked()
+        importer = self.runtime_config["tools"].setdefault("importer", {})
+        importer.update({
+            "database_path": str(self._database_path()),
+            "archive_root": self.archive_field.text().strip(),
+            "extensions_to_copy": self._checked_extensions(self.import_extension_checks) + self._custom_extensions(self.import_other_extensions.text()),
+            "min_file_size_bytes": self.min_size.value(),
+            "max_file_size_bytes": self.max_size.value() or None,
+            "require_exif": self.require_exif_check.isChecked(),
+            "exclude_thumbnails": self.exclude_thumbnails_check.isChecked(),
+            "exclude_path_contains": [part.strip() for part in self.excludes_field.text().split(",") if part.strip()],
+        })
+        save_gui_runtime(self.runtime_config)
+        if hasattr(self, "index_summary"):
+            self._refresh_summaries()
 
-    def _save_path_fields(self):
-        """Persist manually edited Source/Archive values."""
+    @staticmethod
+    def _checked_extensions(controls):
+        return [extension for extension, checkbox in controls.items() if checkbox.isChecked()]
+
+    @staticmethod
+    def _custom_extensions(value):
+        return [extension.strip().lower().lstrip(".") for extension in value.split(",") if extension.strip()]
+
+    def _format_type_summary(self, controls, other_text):
+        selected = self._checked_extensions(controls) + self._custom_extensions(other_text)
+        if not selected:
+            return "No extensions selected"
+        categories = []
+        known_selected = set(selected)
+        for category, extensions in MEDIA_TYPES.items():
+            count = len(known_selected.intersection(extensions))
+            if count:
+                categories.append(f"{category}: {count}")
+        if other_text.strip():
+            categories.append(f"Other: {len(self._custom_extensions(other_text))}")
+        ext_preview = ", ".join(f".{extension}" for extension in selected[:6])
+        if len(selected) > 6:
+            ext_preview += f", +{len(selected) - 6} more"
+        return " · ".join(categories) + "\n" + ext_preview
+
+    def _refresh_summaries(self):
+        if not hasattr(self, "source_path_summary"):
+            return
+        values = (
+            (self.source_path_summary, self.source_field.text().strip() or "Choose a source folder"),
+            (self.archive_path_summary, self.archive_field.text().strip() or "Choose an archive folder"),
+            (self.database_path_summary, str(self._database_path())),
+        )
+        for label, value in values:
+            label.setText(value)
+            label.setToolTip(value)
+        self.index_summary.setText(self._format_type_summary(self.index_extension_checks, self.index_other_extensions.text()))
+        self.prepare_summary.setText(
+            f"Classify images: {'On' if self.classify_check.isChecked() else 'Off'} · OCR: {'On' if self.ocr_check.isChecked() else 'Off'}\n"
+            "Conditioning processes all eligible inventory rows"
+        )
+        self.import_summary.setText(self._format_type_summary(self.import_extension_checks, self.import_other_extensions.text()))
+
+    def _path_changed(self):
         self._save_settings()
         self._update_path_guidance()
 
-    @staticmethod
-    def _folder_problem(value, purpose):
-        """Return a short explanation when a selected working folder is unavailable."""
+    def _database_path_changed(self):
+        self._save_settings()
+        self._refresh_summaries()
+
+    def _folder_problem(self, value, purpose):
         value = value.strip()
         if not value:
             return "not selected"
-
         folder = Path(value).expanduser()
         if not folder.exists():
             return "not available at this path"
         if not folder.is_dir():
             return "the path is not a folder"
-
         try:
             if purpose == "source":
                 with os.scandir(folder) as entries:
                     next(entries, None)
             else:
-                # A uniquely named temporary file checks the actual write
-                # path and avoids touching any existing user files.
-                with tempfile.NamedTemporaryFile(
-                    prefix=".chronovault_path_check_", dir=folder, delete=True
-                ):
+                with tempfile.NamedTemporaryFile(prefix=".chronovault_path_check_", dir=folder, delete=True):
                     pass
         except OSError as exc:
-            action = "read" if purpose == "source" else "write to"
-            return f"ChronoVault cannot {action} this folder ({exc})"
+            return f"cannot {('read' if purpose == 'source' else 'write to')} this folder ({exc})"
         return None
 
     def _update_path_guidance(self):
@@ -294,501 +642,339 @@ class ChronoVaultWindow(QMainWindow):
         archive_problem = self._folder_problem(self.archive_field.text(), "archive")
         self.guidance_source_button.setVisible(source_problem is not None)
         self.guidance_archive_button.setVisible(archive_problem is not None)
-
         if source_problem is None and archive_problem is None:
             self.path_guidance.hide()
             return
-
-        details = []
-        if source_problem is not None:
-            details.append(f"Source: {source_problem}.")
-        if archive_problem is not None:
-            details.append(f"Archive: {archive_problem}.")
-        self.path_guidance_label.setText(
-            "Choose or reconnect the folders ChronoVault needs. Source is the "
-            "drive or folder ChronoVault scans; Archive is where imported files "
-            "are stored. " + " ".join(details)
-        )
+        detail = []
+        if source_problem:
+            detail.append(f"Source: {source_problem}.")
+        if archive_problem:
+            detail.append(f"Archive: {archive_problem}.")
+        self.path_guidance_label.setText("Source is the drive ChronoVault scans. Archive is where imported files are stored. Choose or reconnect the folders. " + " ".join(detail))
         self.path_guidance.show()
 
+    def _browse_source(self):
+        folder = QFileDialog.getExistingDirectory(self, "Choose source folder")
+        if folder:
+            self.source_field.setText(folder)
+            self._path_changed()
+            self._log(f"Source folder set: {folder}")
+
+    def _browse_archive(self):
+        folder = QFileDialog.getExistingDirectory(self, "Choose archive folder")
+        if folder:
+            self.archive_field.setText(folder)
+            self._path_changed()
+            self._log(f"Archive folder set: {folder}")
+
+    def _browse_database(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Choose inventory database", self.database_field.text(), "SQLite database (*.db);;All files (*)")
+        if path:
+            self.database_field.setText(path)
+            self._save_settings()
+            self._refresh_summaries()
+            self._log(f"Inventory database location set: {path}")
+
     def _log(self, description):
-        """
-        Records an event to the persistent rolling log in
-        gui_settings.ini, saved to disk IMMEDIATELY -- not batched until
-        the next natural save point -- so the entry survives even if
-        something crashes right after it's recorded. This is exactly
-        the data the Diagnostic Report button draws on to show what
-        actually happened, not just current state.
-        """
         append_log_entry(self.settings, description)
         save_settings(self.settings)
 
-    def _browse_test_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select test folder")
-        if folder:
-            self._apply_test_folder(folder)
-
-    def _apply_test_folder_from_field(self):
-        folder = self.test_folder_field.text().strip()
-        if folder:
-            self._apply_test_folder(folder)
-
-    def _apply_test_folder(self, folder):
-        """
-        Reset every dependent GUI/config path to one compartmentalized
-        workspace. This creates missing subfolders but never clears or
-        deletes existing workspace contents.
-        """
-        root = Path(folder).expanduser()
-        if not root.exists() or not root.is_dir():
-            QMessageBox.warning(self, "Folder not found",
-                                f"This test folder doesn't exist:\n{root}")
-            return
-
-        writable, error = check_folder_writable(root)
-        if not writable:
-            QMessageBox.warning(self, "Folder not writable",
-                                f"Could not write to this folder:\n{root}\n\n{error}")
-            return
-
-        try:
-            paths = configure_test_folder(self.gui_config, root)
-        except (OSError, json.JSONDecodeError, KeyError) as e:
-            QMessageBox.critical(self, "Test folder setup failed",
-                                 f"Could not configure the test workspace:\n\n{e}")
-            return
-
-        self.test_folder_field.setText(paths['test_folder'])
-        self.source_field.setText(paths['source_folder'])
-        self.archive_field.setText(paths['archive_folder'])
-        self._save_settings()
-        self._update_path_guidance()
-        self._log(f"Test folder set and dependent paths reset: {paths['test_folder']}")
-
-    def _browse_source(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select source folder to search")
-        if folder:
-            self.source_field.setText(folder)
-            self._save_path_fields()
-            self._log(f"Source folder set to: {folder}")
-
-    def _browse_archive(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select archive folder")
-        if folder:
-            self.archive_field.setText(folder)
-            self._save_path_fields()
-            self._log(f"Archive folder set to: {folder}")
-
     def _set_running_state(self, running, tool_name=""):
-        """
-        Disables EVERY action button while anything is running, not just
-        the one that was clicked -- prevents two tools ever writing to
-        the same database at once, which was an explicit design goal
-        going into this GUI, not an incidental restriction. Test
-        Environment, Test Retrieve Data, and Generate Test Data are all
-        included even though none of them risk a real conflict with
-        most other tools -- they still launch through the single shared
-        QProcess slot this GUI tracks, so leaving them visually enabled
-        while another tool runs would be misleading (clicking one would
-        just trigger _launch_tool()'s "Another tool is already running"
-        warning rather than doing anything useful). Generate Report is
-        the one deliberate exception -- it runs synchronously in plain
-        Python, never touches self.process, and is meant to work even
-        while another tool is mid-run.
-        """
-        for button in (self.index_button, self.import_button, self.classify_button, self.condition_button,
-                       self.audit_button, self.duplicate_button, self.test_env_button,
-                       self.test_retrieve_button, self.generate_test_data_button):
-            button.setEnabled(not running)
-        self.status_label.setText(f"Running {tool_name}…" if running else "Ready.")
+        if running:
+            self.active_tool_name = tool_name
+        self.main_tabs.setEnabled(not running)
+        self.status_label.setText(f"Running {tool_name}…" if running else "Ready")
+        show_stop = running and tool_name == "Condition Database"
+        self.stop_condition_button.setVisible(show_stop)
+        self.stop_condition_button.setEnabled(show_stop)
+
+    def _request_condition_stop(self):
+        if self.process is None or self.active_tool_name != "Condition Database":
+            return
+        self.stop_condition_button.setEnabled(False)
+        self.status_label.setText("Stopping Condition Database…")
+        self.output_panel.appendPlainText("\nRequesting a safe stop after the current checkpoint…")
+        self._log("Condition Database stop requested")
+        self.process.terminate()
+
+    def _consume_progress_line(self, line):
+        prefix = "CHRONOVAULT_PROGRESS "
+        # The shared hash helper prints an in-place byte counter with `\r`
+        # immediately before its caller emits the machine-readable event.
+        # Keep parsing the documented event when both arrive on one terminal
+        # line, while leaving the combined text visible in the output panel.
+        prefix_index = line.find(prefix)
+        if prefix_index < 0:
+            return
+        try:
+            event = json.loads(line[prefix_index + len(prefix):])
+        except json.JSONDecodeError:
+            return
+        if event.get("version") != 1 or event.get("tool") != "condition_database":
+            return
+        if event.get("event") != "progress":
+            return
+        stage_names = {
+            "hash_refresh": "Hash refresh",
+            "date_conditioning": "Date conditioning",
+            "duplicate_regrouping": "Duplicate regrouping",
+        }
+        stage = stage_names.get(event.get("stage"), event.get("stage", "Working"))
+        completed = event.get("completed", 0)
+        total = event.get("total", 0)
+        progress = f"{completed}/{total}"
+        file_bytes_total = event.get("file_bytes_total")
+        if file_bytes_total:
+            file_bytes_completed = event.get("file_bytes_completed", 0)
+            progress += f" · {file_bytes_completed}/{file_bytes_total} bytes"
+        self.status_label.setText(f"Condition Database · {stage} {progress}")
 
     def _append_output(self):
-        if self.process is None:
+        if self.process is not None:
+            data = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
+            if data:
+                self._stdout_event_buffer += data
+                lines = self._stdout_event_buffer.split("\n")
+                self._stdout_event_buffer = lines.pop()
+                for line in lines:
+                    line = line.rstrip("\r")
+                    self._consume_progress_line(line)
+                    if "CHRONOVAULT_PROGRESS " not in line:
+                        self.output_panel.appendPlainText(line)
+
+    def _flush_stdout_event_buffer(self):
+        if not self._stdout_event_buffer:
             return
-        data = bytes(self.process.readAllStandardOutput())
-        text = data.decode('utf-8', errors='replace')
-        if text:
-            self.output_panel.appendPlainText(text.rstrip('\n'))
+        line = self._stdout_event_buffer.rstrip("\r")
+        self._stdout_event_buffer = ""
+        self._consume_progress_line(line)
+        if "CHRONOVAULT_PROGRESS " not in line:
+            self.output_panel.appendPlainText(line)
 
-    def _process_finished(self, tool_name, exit_code, exit_status):
-        """
-        Distinguishes three real outcomes -- a clean finish, a nonzero
-        exit (the tool ran but reported an error), and a crash -- rather
-        than collapsing them all into one generic "done" message. This
-        distinction becomes more important once a Stop button exists:
-        the GUI will need to tell apart "the user stopped it" from "it
-        crashed on its own" (e.g. a disconnected drive), and this is the
-        one place that decision gets made.
-        """
-        if exit_status == QProcess.ExitStatus.CrashExit:
-            self.output_panel.appendPlainText(f"\n--- {tool_name} was terminated or crashed. ---")
-            self.status_label.setText(f"{tool_name} did not finish cleanly.")
-            self._log(f"{tool_name} crashed or was terminated")
-        elif exit_code != 0:
-            self.output_panel.appendPlainText(f"\n--- {tool_name} exited with an error (code {exit_code}). ---")
-            self.status_label.setText(f"{tool_name} finished with an error.")
-            self._log(f"{tool_name} exited with an error (code {exit_code})")
-        else:
-            self.output_panel.appendPlainText(f"\n--- {tool_name} finished. ---")
-            self.status_label.setText(f"{tool_name} finished successfully.")
-            self._log(f"{tool_name} finished successfully")
-
-        self.process = None
-        self._set_running_state(False)
-
-    def _launch_tool(self, tool_name, script_relative_path, args):
-        """
-        Launch a tool as a subprocess, exactly as it would run from a
-        terminal at the project root -- same script, same config.json,
-        same working directory. Output streams live into the output
-        panel as it's produced (via readyReadStandardOutput), rather
-        than waiting for the tool to finish before showing anything.
-        """
+    def _launch_tool(self, tool_name, script_relative_path, args, next_steps=None):
         if self.process is not None:
             QMessageBox.warning(self, "Busy", "Another tool is already running.")
             return
-
-        full_script_path = PROJECT_ROOT / script_relative_path
-        if not full_script_path.exists():
-            QMessageBox.critical(
-                self, "Tool not found",
-                f"Could not find:\n{full_script_path}\n\n"
-                f"Check gui_config.json's path for '{tool_name}'."
-            )
+        script = PROJECT_ROOT / script_relative_path
+        if not script.exists():
+            QMessageBox.critical(self, "Tool not found", f"Could not find:\n{script}")
             return
+        self.process_queue = list(next_steps or [])
+        self._start_process(tool_name, script_relative_path, args)
 
-        self.output_panel.appendPlainText(f"\n$ python3 {script_relative_path} {' '.join(args)}")
-        self._log(f"{tool_name} launched: python3 {script_relative_path} {' '.join(args)}")
+    def _start_process(self, tool_name, script_relative_path, args):
+        self.output_panel.appendPlainText(f"\n$ {Path(sys.executable).name} {script_relative_path} {' '.join(map(str, args))}")
+        self._log(f"{tool_name} launched: {script_relative_path} {' '.join(map(str, args))}")
         self._set_running_state(True, tool_name)
-
+        self._stdout_event_buffer = ""
         self.process = QProcess(self)
         self.process.setWorkingDirectory(str(PROJECT_ROOT))
         self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.process.readyReadStandardOutput.connect(self._append_output)
-        self.process.finished.connect(
-            lambda code, status: self._process_finished(tool_name, code, status)
-        )
-        self.process.start(sys.executable, [str(script_relative_path)] + args)
+        self.process.finished.connect(lambda code, status: self._process_finished(tool_name, code, status))
+        self.process.start(sys.executable, [str(script_relative_path)] + list(map(str, args)))
+
+    def _process_finished(self, tool_name, exit_code, exit_status):
+        self._append_output()
+        self._flush_stdout_event_buffer()
+        self.process = None
+        if (tool_name == "Condition Database"
+                and exit_status == QProcess.ExitStatus.NormalExit
+                and exit_code == 2):
+            self.output_panel.appendPlainText("\n--- Condition Database stopped safely. ---")
+            self._log("Condition Database stopped safely")
+            self.process_queue.clear()
+            self._set_running_state(False)
+            self.status_label.setText("Condition Database stopped.")
+            return
+        if exit_status == QProcess.ExitStatus.CrashExit or exit_code != 0:
+            self.output_panel.appendPlainText(f"\n--- {tool_name} failed (exit code {exit_code}). ---")
+            self._log(f"{tool_name} failed (exit code {exit_code})")
+            self.process_queue.clear()
+            self._set_running_state(False)
+            self.status_label.setText(f"{tool_name} failed.")
+            return
+        self.output_panel.appendPlainText(f"\n--- {tool_name} finished. ---")
+        self._log(f"{tool_name} finished successfully")
+        if self.process_queue:
+            next_step = self.process_queue.pop(0)
+            self._start_process(*next_step)
+            return
+        self._set_running_state(False)
+        if tool_name == "Condition Database":
+            self.status_label.setText("Condition Database completed.")
+
+    def _tool(self, key):
+        tool = self.gui_config.get("tools", {}).get(key)
+        if not tool:
+            QMessageBox.critical(self, "Not configured", f"No '{key}' entry in gui/gui_config.json.")
+            return None
+        return tool
+
+    def _module_config_path(self, key):
+        tool = self._tool(key)
+        if not tool:
+            return None
+        return tool["config"]
+
+    def _write_module_config(self, key, values):
+        config = self._module_config_path(key)
+        if config is None:
+            return False
+        try:
+            update_values_in_config(config, values)
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            QMessageBox.critical(self, "Configuration error", f"Could not update {config}:\n{exc}")
+            return False
+        return True
+
+    def _common_config(self):
+        self._save_settings()
+        reports = self._reports_folder()
+        reports.mkdir(parents=True, exist_ok=True)
+        return str(self._database_path()), reports
 
     def _run_indexer(self):
-        if 'indexer' not in self.gui_config.get('tools', {}):
-            QMessageBox.critical(self, "Not configured", "No 'indexer' entry found in gui_config.json.")
+        tool = self._tool("indexer")
+        if not tool:
             return
-
         source = self.source_field.text().strip()
-        if not source:
-            QMessageBox.warning(self, "Missing source folder", "Choose a source folder to search first.")
+        if not source or not Path(source).is_dir():
+            QMessageBox.warning(self, "Source unavailable", "Choose an available source folder first.")
             return
-        if not Path(source).exists():
-            QMessageBox.warning(self, "Folder not found", f"This folder doesn't exist:\n{source}")
+        extensions = self._checked_extensions(self.index_extension_checks)
+        if not extensions:
+            QMessageBox.warning(self, "No file types selected", "Select at least one extension to index.")
             return
-
-        args = []
         if check_looks_like_archive(source):
-            proceed = QMessageBox.question(
-                self, "This looks like a ChronoVault archive",
-                f"'{source}' looks like it might already be a ChronoVault archive "
-                f"(it contains archive_database.db).\n\n"
-                f"Indexing an existing archive and importing it again would re-copy every "
-                f"file into itself as duplicate copies -- almost certainly not what you "
-                f"want, unless you're deliberately migrating or consolidating an archive.\n\n"
-                f"Continue anyway?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
-            )
-            if proceed != QMessageBox.StandardButton.Yes:
+            answer = QMessageBox.question(self, "Existing archive selected", "This Source contains archive_database.db. Indexing an archive can create another copy of its files. Continue?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
                 return
-            args.append('--allow-archive-source')
-
         self._save_settings()
-        tool = self.gui_config['tools']['indexer']
-        self._launch_tool("Indexer", tool['script'], [tool['config'], source] + args)
+        self._launch_tool("Indexer", tool["script"], [str(GUI_RUNTIME_PATH), source])
+
+    def _run_prepare(self):
+        db, reports = self._common_config()
+        steps = []
+        if self.classify_check.isChecked():
+            tool = self._tool("classify_media")
+            if not tool:
+                return
+            image_extensions = [e for e in self._checked_extensions(self.index_extension_checks) if e in IMAGE_EXTENSIONS]
+            if not self._write_module_config("classify_media", {"database_path": db, "output_report_path": str(reports / "classification_report.json"), "image_extensions": image_extensions}):
+                return
+            steps.append(("Classify Media", tool["script"], [tool["config"]]))
+        tool = self._tool("condition_database")
+        if not tool:
+            return
+        if not self._write_module_config("condition_database", {"database_path": db, "output_report_path": str(reports / "condition_report.json"), "try_ocr": self.ocr_check.isChecked()}):
+            return
+        steps.append(("Condition Database", tool["script"], [tool["config"]]))
+        first = steps.pop(0)
+        self._launch_tool(*first, next_steps=steps)
 
     def _run_importer(self):
-        if 'importer' not in self.gui_config.get('tools', {}):
-            QMessageBox.critical(self, "Not configured", "No 'importer' entry found in gui_config.json.")
+        tool = self._tool("importer")
+        if not tool:
             return
-
         archive = self.archive_field.text().strip()
         if not archive:
-            QMessageBox.warning(self, "Missing archive folder", "Choose an archive folder first.")
+            QMessageBox.warning(self, "Archive not selected", "Choose an Archive folder first.")
             return
-
-        # Only interrupts for the genuinely ambiguous case: an existing
-        # archive proceeds silently, and so does a brand-new/empty
-        # folder -- neither needs a person to confirm anything. Found
-        # necessary by a real mistake: pointing Import at the same
-        # top-level folder used for generated test data mixed
-        # archive_database.db and the date folders directly alongside
-        # unrelated content, rather than into a dedicated subfolder.
-        destination_status = check_archive_destination(archive)
-        if destination_status == 'nonempty_no_archive':
+        if not self._checked_extensions(self.import_extension_checks):
+            QMessageBox.warning(self, "No file types selected", "Select at least one extension to import.")
+            return
+        status = check_archive_destination(archive)
+        if status == "nonempty_no_archive":
             box = QMessageBox(self)
             box.setIcon(QMessageBox.Icon.Warning)
-            box.setWindowTitle("Archive location has no database yet")
-            box.setText(
-                f"'{archive}' already has other files or folders in it, but no "
-                f"archive_database.db -- this doesn't look like an established archive yet.\n\n"
-                f"This can happen if a higher-level folder gets selected by mistake (e.g. the "
-                f"same parent folder used for generated test data)."
-            )
+            box.setWindowTitle("Archive folder contains other files")
+            box.setText("This folder has content but no archive database yet. Choose a dedicated archive folder, create an archive subfolder here, or continue only if this location is intended.")
             use_anyway = box.addButton("Use This Folder Anyway", QMessageBox.ButtonRole.AcceptRole)
-            create_subfolder = box.addButton("Create 'archive' Subfolder Here", QMessageBox.ButtonRole.ActionRole)
+            make_subfolder = box.addButton("Create 'archive' Subfolder", QMessageBox.ButtonRole.ActionRole)
             cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
             box.setDefaultButton(cancel)
             box.exec()
             clicked = box.clickedButton()
-
-            if clicked is cancel:
+            if clicked not in (use_anyway, make_subfolder):
                 return
-            elif clicked is create_subfolder:
+            if clicked is make_subfolder:
                 archive = str(Path(archive) / "archive")
                 self.archive_field.setText(archive)
-                self._log(f"Archive folder redirected to dedicated subfolder: {archive}")
-            # else: "Use This Folder Anyway" -- proceed with the original archive value unchanged
-
+                self._path_changed()
         self._save_settings()
-        tool = self.gui_config['tools']['importer']
-
-        try:
-            update_archive_root_in_config(tool['config'], archive)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            QMessageBox.critical(self, "Config error",
-                                  f"Could not update {tool['config']}:\n{e}")
-            return
-
-        self._launch_tool("Importer", tool['script'], [tool['config']])
-
-    def _run_condition_database(self):
-        """
-        Launched with its own config.json completely unchanged -- same
-        as chronovault.sh's own Condition Database step. Unlike Importer,
-        this tool has no archive_root concept at all (it operates on
-        located_files.db directly), so there's nothing for the GUI to
-        sync before running it.
-        """
-        if 'condition_database' not in self.gui_config.get('tools', {}):
-            QMessageBox.critical(self, "Not configured", "No 'condition_database' entry found in gui_config.json.")
-            return
-        tool = self.gui_config['tools']['condition_database']
-        self._launch_tool("Condition Database", tool['script'], [tool['config']])
-
-    def _run_classify_media(self):
-        """Run the conservative pre-hash image classifier against located_files.db."""
-        if 'classify_media' not in self.gui_config.get('tools', {}):
-            QMessageBox.critical(self, "Not configured", "No 'classify_media' entry found in gui_config.json.")
-            return
-        tool = self.gui_config['tools']['classify_media']
-        self._launch_tool("Classify Media", tool['script'], [tool['config']])
+        self._launch_tool("Importer", tool["script"], [str(GUI_RUNTIME_PATH)])
 
     def _run_audit_archive(self):
-        """
-        Now syncs the Archive field before running -- reversed from an
-        earlier version that deliberately left this unsynced. That
-        turned out to be wrong in practice: Importer would succeed
-        against a custom archive path while this tool silently checked
-        the stale default instead, failing with "Archive root 'archive'
-        does not exist" -- a correct error, but a confusing, avoidable
-        one. Same requirement as Importer: needs a real archive path,
-        since this tool has no meaningful way to run without one.
-        """
-        if 'audit_archive' not in self.gui_config.get('tools', {}):
-            QMessageBox.critical(self, "Not configured", "No 'audit_archive' entry found in gui_config.json.")
-            return
-
+        tool = self._tool("audit_archive")
         archive = self.archive_field.text().strip()
-        if not archive:
-            QMessageBox.warning(self, "Missing archive folder", "Choose an archive folder first.")
+        if not tool or not archive:
+            if not archive:
+                QMessageBox.warning(self, "Archive not selected", "Choose an Archive folder first.")
             return
-
-        tool = self.gui_config['tools']['audit_archive']
-        try:
-            update_archive_root_in_config(tool['config'], archive)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            QMessageBox.critical(self, "Config error", f"Could not update {tool['config']}:\n{e}")
-            return
-
-        self._launch_tool("Audit Archive", tool['script'], [tool['config']])
+        _, reports = self._common_config()
+        if self._write_module_config("audit_archive", {"archive_root": archive, "output_path": str(reports / "audit_result.json")}):
+            self._launch_tool("Audit Archive", tool["script"], [tool["config"]])
 
     def _run_duplicate_finder(self):
-        """
-        Also now syncs, same reversal and reasoning as Audit Archive
-        above -- but the Archive field is NOT required here, unlike
-        Audit Archive/Importer. Duplicate Finder is dual-mode: in
-        'source' mode it doesn't need an archive_root at all, so forcing
-        the field would incorrectly block a legitimate source-mode run.
-        If the field is empty, this just launches with whatever mode and
-        settings are already in the config file, same as chronovault.sh
-        would. update_archive_root_in_config() is itself mode-aware, so
-        even when the field IS filled in, a source-mode config is left
-        alone rather than getting an unused archive_root written into it.
-        """
-        if 'duplicate_finder' not in self.gui_config.get('tools', {}):
-            QMessageBox.critical(self, "Not configured", "No 'duplicate_finder' entry found in gui_config.json.")
-            return
-
-        tool = self.gui_config['tools']['duplicate_finder']
+        tool = self._tool("duplicate_finder")
         archive = self.archive_field.text().strip()
+        if not tool or not archive:
+            if not archive:
+                QMessageBox.warning(self, "Archive not selected", "Choose an Archive folder first.")
+            return
+        _, reports = self._common_config()
+        if self._write_module_config("duplicate_finder", {"mode": "archive", "archive_root": archive, "output_path": str(reports / "duplicate_report.json")}):
+            self._launch_tool("Duplicate Finder", tool["script"], [tool["config"]])
 
-        if archive:
-            try:
-                update_archive_root_in_config(tool['config'], archive)
-            except (FileNotFoundError, json.JSONDecodeError) as e:
-                QMessageBox.critical(self, "Config error", f"Could not update {tool['config']}:\n{e}")
-                return
-
-        self._launch_tool("Duplicate Finder", tool['script'], [tool['config']])
+    def _run_review_data(self):
+        tool = self._tool("test_retrieve_data")
+        archive = self.archive_field.text().strip()
+        if not tool or not archive:
+            if not archive:
+                QMessageBox.warning(self, "Archive not selected", "Choose an Archive folder first.")
+            return
+        if self._write_module_config("test_retrieve_data", {"archive_root": archive}):
+            self._launch_tool("Review uncertain dates", tool["script"], [tool["config"]])
 
     def _run_test_env(self):
-        """
-        No config file and no arguments at all -- test_env.py takes
-        neither. It resolves every path it checks (its own project root,
-        located_files.db, archive/) relative to its own script location,
-        not the current working directory, so unlike several other
-        tools here, there's no archive-path syncing concern at all.
-        """
-        if 'test_env' not in self.gui_config.get('tools', {}):
-            QMessageBox.critical(self, "Not configured", "No 'test_env' entry found in gui_config.json.")
-            return
-        tool = self.gui_config['tools']['test_env']
-        self._launch_tool("Test Environment", tool['script'], [])
-
-    def _run_test_retrieve_data(self):
-        """
-        Requires the Archive field, same as Audit Archive/Importer --
-        unlike Duplicate Finder, this tool has no mode where an archive
-        isn't needed at all. Syncs archive_root into its own config.json
-        before launching, using the exact same mode-aware function used
-        everywhere else -- this config has no 'mode' key, so it's always
-        updated, the same as Importer/Audit Archive.
-        """
-        if 'test_retrieve_data' not in self.gui_config.get('tools', {}):
-            QMessageBox.critical(self, "Not configured", "No 'test_retrieve_data' entry found in gui_config.json.")
-            return
-
-        archive = self.archive_field.text().strip()
-        if not archive:
-            QMessageBox.warning(self, "Missing archive folder", "Choose an archive folder first.")
-            return
-
-        tool = self.gui_config['tools']['test_retrieve_data']
-        try:
-            update_archive_root_in_config(tool['config'], archive)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            QMessageBox.critical(self, "Config error", f"Could not update {tool['config']}:\n{e}")
-            return
-
-        self._launch_tool("Test Retrieve Data", tool['script'], [tool['config']])
-
-    def _run_generate_test_data(self):
-        """
-        Generate fixtures directly inside the active workspace's
-        test_data folder. Existing data is not cleared first.
-        """
-        if 'generate_test_data' not in self.gui_config.get('tools', {}):
-            QMessageBox.critical(self, "Not configured", "No 'generate_test_data' entry found in gui_config.json.")
-            return
-
-        test_folder = self.test_folder_field.text().strip()
-        if not test_folder:
-            QMessageBox.warning(self, "Missing test folder", "Choose a Test folder first.")
-            return
-
-        paths = get_test_folder_paths(test_folder)
-        writable, error = check_folder_writable(paths['test_folder'])
-        if not writable:
-            QMessageBox.warning(self, "Folder not writable",
-                                 f"Could not write to this folder:\n{paths['test_folder']}\n\n{error}\n\n"
-                                 f"Choose a different folder.")
-            return
-
-        output_dir = paths['source_folder']
-        self._log(f"Generate Test Data: destination set to {output_dir}")
-
-        tool = self.gui_config['tools']['generate_test_data']
-        self._launch_tool("Generate Test Data", tool['script'], ['--output-dir', output_dir])
+        tool = self._tool("test_env")
+        if tool:
+            self._launch_tool("Environment check", tool["script"], [])
 
     def _run_diagnostic_report(self):
-        """
-        Read-only, and deliberately NOT gated by _set_running_state --
-        this should work even while another tool is mid-run (that's
-        often exactly when you'd want it), and it never writes to
-        anything the pipeline tools care about. Shows the report inline
-        in the output panel (consistent with everything else appearing
-        there) and also saves it to a file, since a file is easier to
-        copy in full or attach than scrolling back through the panel.
-
-        generate_diagnostic_report() is wrapped in a try/except -- found
-        necessary by a real crash: an earlier version logged "Diagnostic
-        Report generated" BEFORE attempting generation, then had no
-        handling at all if it failed, so an exception propagated straight
-        to the terminal with zero visible sign in the GUI itself that
-        anything had gone wrong. That's the worst possible failure mode
-        for specifically this feature -- its entire purpose is helping
-        when something's wrong, so it silently failing is the one thing
-        it must never do. The log entry now reflects what actually
-        happened (generated vs. FAILED), not an assumption made before
-        the attempt.
-        """
         try:
             report = generate_diagnostic_report(
-                self.source_field.text().strip(),
-                self.archive_field.text().strip(),
-                log_entries=get_log_entries(self.settings),
-                test_folder_value=self.test_folder_field.text().strip()
+                self.source_field.text().strip(), self.archive_field.text().strip(),
+                log_entries=get_log_entries(self.settings), test_folder_value="",
+                inventory_database_path=str(self._database_path()),
+                runtime_config=self.runtime_config,
             )
-        except Exception as e:
-            self._log(f"Diagnostic Report generation FAILED: {e}")
-            self.output_panel.appendPlainText(f"\n--- Could not generate diagnostic report: {e} ---")
-            QMessageBox.critical(self, "Diagnostic Report Failed",
-                                  f"Could not generate the diagnostic report:\n\n{e}")
-            return
-
-        self._log("Diagnostic Report generated")
-        self.output_panel.appendPlainText("\n" + report)
-
-        test_folder = self.test_folder_field.text().strip()
-        if test_folder:
-            report_path = Path(get_test_folder_paths(test_folder)['diagnostic_report_path'])
-        else:
-            report_path = PROJECT_ROOT / "gui" / "diagnostic_report.txt"
-        try:
-            report_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(report_path, 'w') as f:
-                f.write(report)
-            self.output_panel.appendPlainText(f"\n(Also saved to {report_path})")
-        except OSError as e:
-            self.output_panel.appendPlainText(f"\n(Could not save report to file: {e})")
+            self.output_panel.appendPlainText("\n" + report)
+            path = self._reports_folder() / "diagnostic_report.txt"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(report, encoding="utf-8")
+            self.output_panel.appendPlainText(f"\n(Also saved to {path})")
+            self._log("Diagnostic report generated")
+        except Exception as exc:
+            QMessageBox.critical(self, "Report failed", f"Could not generate the diagnostic report:\n\n{exc}")
+            self._log(f"Diagnostic report failed: {exc}")
 
     def closeEvent(self, event):
-        log_clean_shutdown(self.settings)
+        self._log("Application closed (clean shutdown)")
         self._save_settings()
         super().closeEvent(event)
 
 
 def main():
     app = QApplication(sys.argv)
-    window = ChronoVaultWindow()
-
-    if window.gui_config_load_failed:
-        QMessageBox.critical(
-            window, "Missing configuration",
-            "gui/gui_config.json was not found or could not be read.\n"
-            "The Index and Import buttons won't work until it's restored."
-        )
-
+    try:
+        window = ChronoVaultWindow()
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        QMessageBox.critical(None, "Runtime configuration error", f"Could not load GUI settings:\n\n{exc}")
+        return 1
     if window.previous_session_crashed:
-        # Not a blocking dialog on purpose -- a startup popup for
-        # something that may well have been an ordinary force-quit is
-        # more annoying than helpful. A visible note in the same output
-        # panel everything else appears in is enough; the full detail
-        # (exactly what the last recorded event was) is one click away
-        # via Generate Diagnostic Report.
-        window.output_panel.appendPlainText(
-            "Note: the previous session didn't shut down cleanly (no clean-exit record found). "
-            "If something seems off, use 'Generate Diagnostic Report' on the right for details."
-        )
-
+        window.output_panel.appendPlainText("The previous session did not record a clean shutdown. Generate a diagnostic report if something seems wrong.")
     window.show()
     sys.exit(app.exec())
 

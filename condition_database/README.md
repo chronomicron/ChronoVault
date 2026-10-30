@@ -16,6 +16,10 @@ Duplicate Finder already catches duplicates, but only *after* they've been copie
 
 This is deliberately type-agnostic. Hashing works identically for a JPEG, MP3, PDF, Word document, or other file. `analyze_date` applies filename and containing-folder patterns to every type, then uses the filesystem timestamp as its weakest fallback; JPEG-family and TIFF files can additionally receive format-specific metadata signals. Audio/video-specific metadata and document metadata are not implemented.
 
+## Processing Priority
+
+Both source-hash refresh and date conditioning use the same deterministic order: image rows first, video rows second, and all other file types third. Images are `.jpg`, `.jpeg`, `.bmp`, `.tif`, `.tiff`, `.png`, `.gif`, `.webp`, `.thm`, `.raw`, `.cr2`, and `.arw`. Videos are `.mp4`, `.mov`, `.avi`, `.mkv`, `.mpeg`, `.mpg`, `.3gp`, `.mts`, and `.m2ts`. Extension matching is case-insensitive and ignores a leading dot. Within each category rows are ordered by inventory `id`, so a stopped run can resume with unfinished images ahead of videos and other files. This changes processing order only; it does not exclude or otherwise change handling for any type.
+
 ## Usage
 
 ```
@@ -41,7 +45,21 @@ Added automatically via repeatable `ALTER TABLE`-if-missing migrations: `confide
 
 `confidence IS NULL` remains the not-yet-date-conditioned marker. Successfully date-processed rows are skipped on later runs; missing or failed date analyses remain eligible for retry. Hash freshness is checked independently for every `located` or Condition Database `duplicate` row, including when no date analysis is needed. Fresh hashes are reused; mismatched or unknown snapshots are recomputed.
 
-Duplicate grouping runs on every invocation, including when no unconditioned rows need date analysis. It temporarily reactivates rows with the Condition Database-owned `'duplicate'` status, refreshes their hashes when needed, then recalculates grouping. Other statuses are not changed. A file that cannot be read stably after bounded retries has its cached hash and fingerprint cleared and is omitted from grouping until a later successful hash.
+Duplicate grouping runs on every invocation, including when no unconditioned rows need date analysis. Previously assigned `'duplicate'` rows remain excluded during hash and date work; the atomic regrouping transaction recalculates their status together with current `'located'` rows. Other statuses are not changed. A file that cannot be read stably after bounded retries has its cached hash and fingerprint cleared and is omitted from grouping until a later successful hash.
+
+## Progress and stopping
+
+Condition Database handles `SIGINT` and `SIGTERM` cooperatively. It checks for a stop between inventory rows, during source hashing, after date analysis, and while recalculating duplicate groups. A hash interrupted during reading is discarded and will be retried on the next run. Completed hash snapshots and date results are committed per row so a rerun can reuse them.
+
+Duplicate statuses are recalculated inside one SQLite transaction. If a stop arrives during that update, the transaction is rolled back, leaving previously identified duplicates excluded from Importer. A stop exits with code `2` and emits a final `stopped` event; successful completion exits with code `0`. The GUI's **Stop conditioning** control sends `SIGTERM` and reports the stopped result separately from success and failure.
+
+The tool writes one-line JSON events to stdout with the `CHRONOVAULT_PROGRESS ` prefix. Version 1 progress events have this shape:
+
+```json
+{"version":1,"event":"progress","tool":"condition_database","stage":"date_conditioning","completed":12,"total":120,"file_path":"/path/to/file.jpg","result":"conditioned"}
+```
+
+Stages are `hash_refresh`, `date_conditioning`, and `duplicate_regrouping`. `completed` and `total` count inventory rows handled in that stage. Hash events may additionally include `file_bytes_completed` and `file_bytes_total` for the file currently being read; the row remains incomplete until its hash is committed. Zero-row stages report `0/0`. Final events use `"event":"status"` with `"status":"completed"` or `"stopped"` and the matching `exit_code` (`0` or `2`). Human-readable terminal output remains available alongside these machine-readable lines.
 
 ## Bug Fixed
 
@@ -56,7 +74,7 @@ Fixed by ensuring `file_hash` at startup regardless of tool order. The current s
 ## Operational Notes and Known Limitation
 
 - Run Indexer first. A nonexistent `database_path` may be created as an empty SQLite file, after which schema alteration fails because `located_files` does not exist.
-- Relative database and report paths are resolved from the process working directory. Rows are committed one at a time; duplicate status changes are committed per group.
+- Relative database and report paths are resolved from the process working directory. Hash and date results are committed per row; duplicate status changes are applied as one transaction.
 - Hashing uses SHA-256 in 4 MiB chunks through the shared `source_inventory_hash.py` helper. It compares current size and `st_mtime_ns` to the stored snapshot and retries a changing file twice after the initial attempt. Metadata-based freshness cannot detect content changes that preserve both size and modification time. Date analysis behavior is unchanged. Pillow is needed for JPEG-family EXIF; OCR additionally needs its optional dependencies described in `analyze_date/image_tools/README.md`.
 - The report contains processed/failed counts plus each duplicate hash, retained path, and paths marked duplicate. Individual non-duplicate failures are counted and printed but are not listed in the JSON report.
 
